@@ -12,26 +12,31 @@ CFLAGS = -O2 -Wall  -D'PACKAGE="$(PACKAGE)"' -D'VERSION="$(VERSION)"' -D'EMAIL="
 
 DAEMONDIR = /usr/local/bin
 
-#Libraries
+#.PHONY Targets
+
+.PHONY: all, clean, install, dist
 
 # Object file lists
 
-OBJS = rc65.o serio.o notify.o
+OBJS = $(PACKAGE).o serio.o notify.o
 
 #Dependencies
 
-all: rc65 
+all: $(PACKAGE) 
 
-rc65.o: Makefile rc65.c notify.h serio.h
+$(PACKAGE).o: Makefile $(PACKAGE).c notify.h serio.h
 
 #Rules
 
-rc65: $(OBJS)
-	$(CC) $(CFLAGS) -o rc65 $(OBJS) -lxPL
+$(PACKAGE): $(OBJS)
+	$(CC) $(CFLAGS) -o $(PACKAGE) $(OBJS) -lxPL
 
 clean:
-	-rm -f rc65 *.o core
+	-rm -f $(PACKAGE) *.o core
 
 install:
-	cp rc65 $(DAEMONDIR)
+	cp $(PACKAGE) $(DAEMONDIR)
+
+dist:
+	(cd ..; tar cvzf $(PACKAGE).tar.gz $(PACKAGE) --exclude *.o --exclude $(PACKAGE)/$(PACKAGE) --exclude .git --exclude .*.swp)
 

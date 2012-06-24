@@ -21,11 +21,11 @@
 *
 */
 
-#define _GNU_SOURCE
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
+#include <ctype.h>
 #include <getopt.h>
 #include <limits.h>
 #include <sys/types.h>
@@ -56,9 +56,11 @@ int rc65Address = 1;
 static seriostuff_t *serioStuff = NULL;
 static xPL_ServicePtr rc65Service = NULL;
 static xPL_MessagePtr rc65StatusMessage = NULL;
+static xPL_MessagePtr rc65TriggerMessage = NULL;
 static char comPort[WS_SIZE] = DEF_COM_PORT;
 static char interface[WS_SIZE] = "";
-static char logPath[WS_SIZE] = ""; 
+static char logPath[WS_SIZE] = "";
+static char lastLine[WS_SIZE]; 
 
 /* Commandline options. */
 
@@ -78,6 +80,39 @@ static struct option longOptions[] = {
 static  config_t config = {
 	DEF_UPDATE_RATE
 };
+
+/*
+* Change string to lower case
+* Warning: String must be nul terminated.
+*/
+
+static String str2Lower(char *q)
+{
+	char *p;
+			
+	if(q){
+		for (p = q; *p; ++p) *p = tolower(*p);
+	}
+	return q;
+}
+
+/*
+* Change string to upper case
+* Warning: String must be nul terminated.
+*/
+
+static String str2Upper(char *q)
+{
+	char *p;
+			
+	if(q){
+		for (p = q; *p; ++p) *p = toupper(*p);
+	}
+	return q;
+}
+
+
+
 
 
 /*
@@ -145,6 +180,28 @@ static void shutdownHandler(int onSignal)
 	exit(0);
 }
 
+/*
+* Parse an RC65 status line into its constituant elements
+*/
+
+static int parseRC65Status(String ws, String *list, int limit)
+{
+	int i;
+	String strtokrArgSave, arg, argList;
+	const String argDelim = " ";
+
+	/* Bail if pointers are NULL or work string has zero length */
+	if(!ws  || !list || !strlen(ws))
+		return 0;
+
+	for(argList = ws, i = 0; (i < limit) && (arg = strtok_r(argList, argDelim, &strtokrArgSave)); argList = NULL){
+		debug(DEBUG_ACTION,"Arg: %s", arg);
+		list[i++] = arg;
+	}
+	list[i] = NULL; /* Terminate end of list */
+	return i;
+}
+
 
 /*
 * Serial I/O handler (Callback from xPL)
@@ -152,37 +209,79 @@ static void shutdownHandler(int onSignal)
 
 static void serioHandler(int fd, int revents, int userValue)
 {
-	char *line;
-	char *strtokrArgSave;
-	char *arg, *argList, *pd;
-	static const char argDelim = ' ';
+	int curArgc,lastArgc, sendAll = FALSE, i;
+	String line;
+	String pd,wscur,wslast,arg;
+	String curArgList[20];
+	String lastArgList[20];
+
 	
 	/* Do non-blocking line read */
 	if(serio_nb_line_read(serioStuff)){
 		/* Got a line */
 		line = serio_line(serioStuff);
-		/* Clear any old name/values */
-		xPL_clearMessageNamedValues(rc65StatusMessage);
-		debug(DEBUG_STATUS, "Got %s from serial port", line);
-		for(argList = line; (arg = strtok_r(argList, &argDelim, &strtokrArgSave)); argList = NULL){
-			debug(DEBUG_ACTION,"Arg: %s", arg);
-			if(!(pd = strchr(arg,'='))){
-				debug(DEBUG_UNEXPECTED, "Parse error in %s", arg);
-				continue;
-			}
-			*pd = 0;
-			pd++;
-			debug(DEBUG_EXPECTED,"key = %s, value = %s", arg, pd);
-			/* Set key and value */
-			xPL_setMessageNamedValue(rc65StatusMessage, arg, pd);
 
+		/* Compare with last line received */
+		if(strcmp(line, lastLine)){
+			/* Clear any old name/values */
+			xPL_clearMessageNamedValues(rc65TriggerMessage);
+			debug(DEBUG_STATUS, "Got %s from serial port", line);
+
+			/* Make working strings from the current and list lines */
+			wscur = strdup(line);
+			wslast = strdup(lastLine);
+			if(!wscur || !wslast){
+				fatal("Out of memory in serioHandler");
+			}
+
+			/* Parse the current and last lists for comparison */
+
+			curArgc = parseRC65Status(wscur, curArgList, 19);
+			lastArgc = parseRC65Status(wslast, lastArgList, 19);
+
+			/* If arg list mismatch, set the sendAll flag */
+			if(lastArgc != curArgc){
+				sendAll = TRUE;
+			}
+
+			/* Iterate through the list and figure out which args to send */
+			for(i = 0; i < curArgc; i++){
+				arg = curArgList[i];
+
+				/* If sendAll is set or args changed, then add the arg to the list of things to send */
+				if(sendAll || strcmp(curArgList[i], lastArgList[i])){
+					if(!(pd = strchr(arg, '='))){
+						debug(DEBUG_UNEXPECTED, "Parse error in %s", arg);
+						sendAll = TRUE;
+						continue;
+					}
+					*pd = 0;
+					pd++;
+
+					/* Lower case both key and value */
+
+					str2Lower(arg);
+					str2Lower(pd);			
+			
+					debug(DEBUG_EXPECTED, "Adding: key = %s, value = %s", arg, pd);
+					/* Set key and value */
+					xPL_setMessageNamedValue(rc65TriggerMessage, arg, pd);
+				}
+
+			}
+			if(!xPL_sendMessage(rc65TriggerMessage)){
+				debug(DEBUG_UNEXPECTED, "Trigger message transmission failed");
+			}
+			/* Free working strings */
+			free(wscur);
+			free(wslast);
+
+			/* Copy current string into last string for future comparisons */	
+			strncpy(lastLine, line, WS_SIZE);
+			lastLine[WS_SIZE - 1] = 0;
 		}
-		if(!xPL_sendMessage(rc65StatusMessage)){
-			debug(DEBUG_UNEXPECTED, "Status message transmission failed");
-		}	
 	}
 }
-
 /*
 * Show help
 */
@@ -419,13 +518,19 @@ int main(int argc, char *argv[])
  	xPL_addServiceConfigChangedListener(rc65Service, configChangedHandler, NULL);
 
 	/*
-	* Create a message to send.
-	* We don't have to do it here -- you can
-	* create a message anytime and release it later.  But since we know 
- 	* we're going to use this over and over, create one now
+	* Create a status message object
 	*/
+
   	rc65StatusMessage = xPL_createBroadcastMessage(rc65Service, xPL_MESSAGE_STATUS);
   	xPL_setSchema(rc65StatusMessage, "rc65", "status");
+
+	/*
+	* Create a trigger message object
+	*/
+
+	rc65TriggerMessage = xPL_createBroadcastMessage(rc65Service, xPL_MESSAGE_TRIGGER);
+  	xPL_setSchema(rc65TriggerMessage, "rc65", "trigger");
+
 
   	/* Install signal traps for proper shutdown */
  	signal(SIGTERM, shutdownHandler);
@@ -458,7 +563,7 @@ int main(int argc, char *argv[])
 		xPL_processMessages(config.updateRate);
 
 		/* Process clock tick update checking */
-		debug(DEBUG_ACTION, "Sending status request");
+		debug(DEBUG_ACTION, "Polling Status...");
 		serio_printf(serioStuff, "A=%d R=1\r", rc65Address);
 		
   	}
