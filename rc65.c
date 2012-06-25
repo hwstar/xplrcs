@@ -202,6 +202,60 @@ static int parseRC65Status(String ws, String *list, int limit)
 	return i;
 }
 
+/*
+* Our Listener 
+*/
+
+static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
+{
+	int i,nvCount,charsInBuffer;
+	String p,ws;
+	xPL_NameValueListPtr msgBody;
+
+	if(!xPL_isBroadcastMessage(theMessage)){ /* If not a broadcast message */
+		if(xPL_MESSAGE_COMMAND == xPL_getMessageType(theMessage)){ /* If the message is a command */
+			const String const type = xPL_getSchemaType(theMessage);
+			const String const class = xPL_getSchemaClass(theMessage); 
+			debug(DEBUG_EXPECTED, "Command Received: Type = %s, Class = %s", type, class);
+			if(!strcmp(class,"rc65")){
+				if(!strcmp(type,"basic")){
+					debug(DEBUG_EXPECTED, "We have been addressed");
+					if(!(ws = malloc(WS_SIZE)))
+						fatal("Cannot allocate work string in xPLListener");
+					ws[0] = 0;
+
+					/* Append the controller address */
+					sprintf(ws, "A=%d ", rc65Address);
+
+					/* Get the message body */					
+					if((msgBody = xPL_getMessageBody(theMessage))){
+
+						nvCount = xPL_getNamedValueCount(msgBody);
+						/* Iterate over name value pairs till they are all processed, or we run out of buffer */
+						for(i = 0, charsInBuffer = strlen(ws); (charsInBuffer < WS_SIZE - 33) && (i < nvCount); i++){
+							/* Get the name value pair */
+							xPL_NameValuePairPtr nvpp = xPL_getNamedValuePairAt(msgBody, i);
+							if(nvpp && !nvpp->isBinary){
+								p = ws + strlen(ws); /* point to end of current string */
+								charsInBuffer += snprintf(p, 33, "%s=%s", nvpp->itemName, nvpp->itemValue);
+								strcat(ws," "); /* Add delimiter */
+								charsInBuffer++;
+							}
+						}
+						/* Uppercase the command string */
+						str2Upper(ws);
+						debug(DEBUG_EXPECTED, "Parsed RC65 command: %s", ws);
+						/* send the command */
+						/* Add a return for the benefit of the RC-65 controller */
+						serio_printf(serioStuff, "%s\r", ws);
+					}
+					free(ws);
+				}
+			}
+		}
+	}
+}
+
 
 /*
 * Serial I/O handler (Callback from xPL)
@@ -555,6 +609,11 @@ int main(int argc, char *argv[])
 	if(xPL_addIODevice(serioHandler, 1234, serio_fd(serioStuff), TRUE, FALSE, FALSE) == FALSE)
 		fatal("Could not register serial I/O fd with xPL");
 
+
+  	/* And a listener for all xPL messages */
+  	xPL_addMessageListener(xPLListener, NULL);
+
+
  	/** Main Loop **/
 
 	for (;;) {
@@ -565,6 +624,8 @@ int main(int argc, char *argv[])
 		/* Process clock tick update checking */
 		debug(DEBUG_ACTION, "Polling Status...");
 		serio_printf(serioStuff, "A=%d R=1\r", rc65Address);
+		usleep(100000); /* FIXME this is a kludge */
+
 		
   	}
 
