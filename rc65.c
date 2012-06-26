@@ -38,20 +38,16 @@
 
 #define WS_SIZE 256
 
-#define UPDATE_RATE_CFG_NAME	"urate"
-#define DEF_UPDATE_RATE		5000
+#define POLL_RATE_CFG_NAME	"prate"
+#define DEF_POLL_RATE		5
 #define DEF_COM_PORT		"/dev/ttyS0"
-
-typedef struct {
-	int updateRate;
-} config_t;
-
 
 
 char *progName;
 int debugLvl = 0; 
 int noBackground = FALSE;
 int rc65Address = 1;
+int pollRate = 5;
 
 static seriostuff_t *serioStuff = NULL;
 static xPL_ServicePtr rc65Service = NULL;
@@ -77,9 +73,6 @@ static struct option longOptions[] = {
 };
 
 
-static  config_t config = {
-	DEF_UPDATE_RATE
-};
 
 /*
 * Change string to lower case
@@ -144,17 +137,17 @@ static int getConfigInt(xPL_ServicePtr theService, String theName)
 static void parseConfig(xPL_ServicePtr theService)
 {
 
-	int newURate = getConfigInt(theService, UPDATE_RATE_CFG_NAME);
+	int newPRate = getConfigInt(theService, POLL_RATE_CFG_NAME);
 
 
 	/* Handle bad configurable (override it) */
-	if ((newURate < 250) || newURate > 60000) {
-		setConfigInt(theService, UPDATE_RATE_CFG_NAME, config.updateRate );
+	if ((newPRate < 1) || newPRate > 60) {
+		setConfigInt(theService, POLL_RATE_CFG_NAME, pollRate );
 		return;
 	}
 
-	/* Install new update rate */
-	config.updateRate = newURate;
+	/* Install new poll rate */
+	pollRate = newPRate;
 }
 
 /*
@@ -336,6 +329,31 @@ static void serioHandler(int fd, int revents, int userValue)
 		}
 	}
 }
+
+
+/*
+* Our time out handler. 
+* This is used to synchonize the sending of data to the RC65.
+*/
+
+static void tickHandler(int userVal, xPL_ObjectPtr obj)
+{
+	static short pollCtr = 0;
+
+	pollCtr++;
+
+	debug(DEBUG_EXPECTED, "TICK: %d", pollCtr);
+	/* Process clock tick update checking */
+
+	
+	if(pollCtr >= pollRate){
+		pollCtr = 0;
+		debug(DEBUG_ACTION, "Polling Status...");
+		serio_printf(serioStuff, "A=%d R=1\r", rc65Address);
+	}	
+}
+
+
 /*
 * Show help
 */
@@ -559,9 +577,9 @@ int main(int argc, char *argv[])
  	/* should be.                                                               */
 	if (!xPL_isServiceConfigured(rc65Service)) {
   		/* Define a configurable item and give it a default */
-		xPL_addServiceConfigurable(rc65Service, UPDATE_RATE_CFG_NAME, xPL_CONFIG_RECONF, 1);
+		xPL_addServiceConfigurable(rc65Service, POLL_RATE_CFG_NAME, xPL_CONFIG_RECONF, 1);
 
-		setConfigInt(rc65Service, UPDATE_RATE_CFG_NAME, DEF_UPDATE_RATE);
+		setConfigInt(rc65Service, POLL_RATE_CFG_NAME, DEF_POLL_RATE);
   	}
 
   	/* Parse the service configurables into a form this program */
@@ -609,6 +627,8 @@ int main(int argc, char *argv[])
 	if(xPL_addIODevice(serioHandler, 1234, serio_fd(serioStuff), TRUE, FALSE, FALSE) == FALSE)
 		fatal("Could not register serial I/O fd with xPL");
 
+	/* Add 1 second tick service */
+	xPL_addTimeoutHandler(tickHandler, 1, NULL);
 
   	/* And a listener for all xPL messages */
   	xPL_addMessageListener(xPLListener, NULL);
@@ -617,16 +637,8 @@ int main(int argc, char *argv[])
  	/** Main Loop **/
 
 	for (;;) {
-		/* Let XPL run for a while, returning after it hasn't seen any */
-		/* activity   */
-		xPL_processMessages(config.updateRate);
-
-		/* Process clock tick update checking */
-		debug(DEBUG_ACTION, "Polling Status...");
-		serio_printf(serioStuff, "A=%d R=1\r", rc65Address);
-		usleep(100000); /* FIXME this is a kludge */
-
-		
+		/* Let XPL run forever */
+		xPL_processMessages(-1);
   	}
 
 	exit(1);
