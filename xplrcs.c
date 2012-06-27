@@ -1,5 +1,5 @@
 /*
-*    rc65 - an RC-65 RS-485 thermostat to xPL bridge
+*    xplrcs - an RCS RS-485 thermostat to xPL bridge
 *    Copyright (C) 2012  Stephen A. Rodgers
 *
 *    This program is free software: you can redistribute it and/or modify
@@ -45,14 +45,15 @@
 
 char *progName;
 int debugLvl = 0; 
-int noBackground = FALSE;
-int rc65Address = 1;
+Bool noBackground = FALSE;
+int xplrcsAddress = 1;
 int pollRate = 5;
+Bool pollPending = FALSE;
 
 static seriostuff_t *serioStuff = NULL;
-static xPL_ServicePtr rc65Service = NULL;
-static xPL_MessagePtr rc65StatusMessage = NULL;
-static xPL_MessagePtr rc65TriggerMessage = NULL;
+static xPL_ServicePtr xplrcsService = NULL;
+static xPL_MessagePtr xplrcsStatusMessage = NULL;
+static xPL_MessagePtr xplrcsTriggerMessage = NULL;
 static char comPort[WS_SIZE] = DEF_COM_PORT;
 static char interface[WS_SIZE] = "";
 static char logPath[WS_SIZE] = "";
@@ -167,8 +168,8 @@ static void configChangedHandler(xPL_ServicePtr theService, xPL_ObjectPtr userDa
 
 static void shutdownHandler(int onSignal)
 {
-	xPL_setServiceEnabled(rc65Service, FALSE);
-	xPL_releaseService(rc65Service);
+	xPL_setServiceEnabled(xplrcsService, FALSE);
+	xPL_releaseService(xplrcsService);
 	xPL_shutdown();
 	exit(0);
 }
@@ -204,21 +205,22 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 	int i,nvCount,charsInBuffer;
 	String p,ws;
 	xPL_NameValueListPtr msgBody;
+	
 
 	if(!xPL_isBroadcastMessage(theMessage)){ /* If not a broadcast message */
 		if(xPL_MESSAGE_COMMAND == xPL_getMessageType(theMessage)){ /* If the message is a command */
 			const String const type = xPL_getSchemaType(theMessage);
 			const String const class = xPL_getSchemaClass(theMessage); 
 			debug(DEBUG_EXPECTED, "Command Received: Type = %s, Class = %s", type, class);
-			if(!strcmp(class,"rc65")){
-				if(!strcmp(type,"basic")){
-					debug(DEBUG_EXPECTED, "We have been addressed");
+			if(!strcmp(class,"xplrcs")){
+				if((!strcmp(type, "basic"))||(!strcmp(type, "request"))){
+					debug(DEBUG_EXPECTED, "We have a command request");
 					if(!(ws = malloc(WS_SIZE)))
 						fatal("Cannot allocate work string in xPLListener");
 					ws[0] = 0;
 
 					/* Append the controller address */
-					sprintf(ws, "A=%d ", rc65Address);
+					sprintf(ws, "A=%d ", xplrcsAddress);
 
 					/* Get the message body */					
 					if((msgBody = xPL_getMessageBody(theMessage))){
@@ -237,9 +239,9 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 						}
 						/* Uppercase the command string */
 						str2Upper(ws);
-						debug(DEBUG_EXPECTED, "Parsed RC65 command: %s", ws);
+						debug(DEBUG_EXPECTED, "Parsed xplrcs command: %s", ws);
 						/* send the command */
-						/* Add a return for the benefit of the RC-65 controller */
+						/* Add a return for the benefit of the RCS controller */
 						serio_printf(serioStuff, "%s\r", ws);
 					}
 					free(ws);
@@ -267,67 +269,95 @@ static void serioHandler(int fd, int revents, int userValue)
 	if(serio_nb_line_read(serioStuff)){
 		/* Got a line */
 		line = serio_line(serioStuff);
+		if(pollPending){
+			pollPending = FALSE;
+			/* Has to be a response to a poll */
+			/* Compare with last line received */
+			if(strcmp(line, lastLine)){
+				/* Clear any old name/values */
+				xPL_clearMessageNamedValues(xplrcsTriggerMessage);
+				debug(DEBUG_STATUS, "Got updated poll status: %s", line);
 
-		/* Compare with last line received */
-		if(strcmp(line, lastLine)){
-			/* Clear any old name/values */
-			xPL_clearMessageNamedValues(rc65TriggerMessage);
-			debug(DEBUG_STATUS, "Got %s from serial port", line);
+				/* Make working strings from the current and list lines */
+				wscur = strdup(line);
+				wslast = strdup(lastLine);
+				if(!wscur || !wslast){
+					fatal("Out of memory in serioHandler(): point 1");
+				}
 
-			/* Make working strings from the current and list lines */
-			wscur = strdup(line);
-			wslast = strdup(lastLine);
-			if(!wscur || !wslast){
-				fatal("Out of memory in serioHandler");
+				/* Parse the current and last lists for comparison */
+	
+				curArgc = parseRC65Status(wscur, curArgList, 19);
+				lastArgc = parseRC65Status(wslast, lastArgList, 19);
+
+				/* If arg list mismatch, set the sendAll flag */
+				if(lastArgc != curArgc){
+					sendAll = TRUE;
+				}
+
+				/* Iterate through the list and figure out which args to send */
+				for(i = 0; i < curArgc; i++){
+					arg = curArgList[i];
+
+					/* If sendAll is set or args changed, then add the arg to the list of things to send */
+					if(sendAll || strcmp(curArgList[i], lastArgList[i])){
+						if(!(pd = strchr(arg, '='))){
+							debug(DEBUG_UNEXPECTED, "Parse error in %s point 1", arg);
+							sendAll = TRUE;
+							continue;
+						}
+						str2Lower(arg); /* Lower case arg */
+						*pd = 0;
+						pd++;
+						if(strcmp(arg, "a")){ /* Do not send address arg */
+							debug(DEBUG_EXPECTED, "Adding: key = %s, value = %s", arg, pd);
+							/* Set key and value */
+							xPL_setMessageNamedValue(xplrcsTriggerMessage, arg, pd);
+						}
+					}
+
+				}
+				if(!xPL_sendMessage(xplrcsTriggerMessage)){
+					debug(DEBUG_UNEXPECTED, "Trigger message transmission failed");
+				}
+				/* Free working strings */
+				free(wscur);
+				free(wslast);
+
+				/* Copy current string into last string for future comparisons */	
+				strncpy(lastLine, line, WS_SIZE);
+				lastLine[WS_SIZE - 1] = 0;
 			}
-
-			/* Parse the current and last lists for comparison */
-
+		} /* End if(pollPending) */
+		else{
+			/* It's a response not related to a poll */
+			if(!(wscur = strdup(line)))
+				fatal("Out of memory in serioHandler(): point 2");
+			debug(DEBUG_EXPECTED, "Non-poll response: %s", wscur);
 			curArgc = parseRC65Status(wscur, curArgList, 19);
-			lastArgc = parseRC65Status(wslast, lastArgList, 19);
-
-			/* If arg list mismatch, set the sendAll flag */
-			if(lastArgc != curArgc){
-				sendAll = TRUE;
-			}
-
-			/* Iterate through the list and figure out which args to send */
+			xPL_clearMessageNamedValues(xplrcsStatusMessage);
 			for(i = 0; i < curArgc; i++){
 				arg = curArgList[i];
+				str2Lower(arg); /* Lower case arg */
+				if(!(pd = strchr(arg, '='))){
+					debug(DEBUG_UNEXPECTED, "Parse error in %s point 2", arg);
+					continue;
+				}
 
-				/* If sendAll is set or args changed, then add the arg to the list of things to send */
-				if(sendAll || strcmp(curArgList[i], lastArgList[i])){
-					if(!(pd = strchr(arg, '='))){
-						debug(DEBUG_UNEXPECTED, "Parse error in %s", arg);
-						sendAll = TRUE;
-						continue;
-					}
-					*pd = 0;
-					pd++;
-
-					/* Lower case both key and value */
-
-					str2Lower(arg);
-					str2Lower(pd);			
-			
+				*pd = 0;
+				pd++;
+				if(strcmp(arg, "a")){  /* Do not send address arg */
 					debug(DEBUG_EXPECTED, "Adding: key = %s, value = %s", arg, pd);
 					/* Set key and value */
-					xPL_setMessageNamedValue(rc65TriggerMessage, arg, pd);
+					xPL_setMessageNamedValue(xplrcsStatusMessage, arg, pd);
 				}
 
 			}
-			if(!xPL_sendMessage(rc65TriggerMessage)){
-				debug(DEBUG_UNEXPECTED, "Trigger message transmission failed");
-			}
-			/* Free working strings */
-			free(wscur);
-			free(wslast);
-
-			/* Copy current string into last string for future comparisons */	
-			strncpy(lastLine, line, WS_SIZE);
-			lastLine[WS_SIZE - 1] = 0;
+			if(!xPL_sendMessage(xplrcsStatusMessage))
+				debug(DEBUG_UNEXPECTED, "Status message transmission failed");
+			free(wscur); /* Free working string */
 		}
-	}
+	} /* End serio_nb_line_read */
 }
 
 
@@ -349,7 +379,8 @@ static void tickHandler(int userVal, xPL_ObjectPtr obj)
 	if(pollCtr >= pollRate){
 		pollCtr = 0;
 		debug(DEBUG_ACTION, "Polling Status...");
-		serio_printf(serioStuff, "A=%d R=1\r", rc65Address);
+		serio_printf(serioStuff, "A=%d R=1\r", xplrcsAddress);
+		pollPending = TRUE;
 	}	
 }
 
@@ -360,13 +391,13 @@ static void tickHandler(int userVal, xPL_ObjectPtr obj)
 
 void showHelp(void)
 {
-	printf("'%s' is a daemon that bridges xPL to rc65 thermostats\n", progName);
+	printf("'%s' is a daemon that bridges xPL to xplrcs thermostats\n", progName);
 	printf("via an RS-232 or RS-485 interface\n");
 	printf("\n");
 	printf("Usage: %s [OPTION]...\n", progName);
 	printf("\n");
 	printf("  -a, --address ADDR      Set the address for the RC-65 thermostat\n");
-	printf("                          (Valid addresses are 0 - 255, %d is the default)\n", rc65Address); 
+	printf("                          (Valid addresses are 0 - 255, %d is the default)\n", xplrcsAddress); 
 	printf("  -d, --debug LEVEL       Set the debug level, 0 is off, the\n");
 	printf("                          compiled-in default is %d and the max\n", debugLvl);
 	printf("                          level allowed is %d\n", DEBUG_MAX);
@@ -414,8 +445,8 @@ int main(int argc, char *argv[])
 		
 			/* Was it a thermostat address? */
 			case 'a':
-				rc65Address = atoi(optarg);
-				if(rc65Address < 0 || rc65Address > 255) {
+				xplrcsAddress = atoi(optarg);
+				if(xplrcsAddress < 0 || xplrcsAddress > 255) {
 					fatal("Invalid thermostat address");
 				}
 				break;
@@ -563,45 +594,45 @@ int main(int argc, char *argv[])
 
 	/* Start xPL up */
 	if (!xPL_initialize(xPL_getParsedConnectionType())) {
-		fatal("Unable to start rc65 xPL lib");
+		fatal("Unable to start xPL lib");
 	}
 
-	/* Initialze rc65 service */
+	/* Initialze xplrcs service */
 
 	/* Create a configurable service and set our application version */
-	rc65Service = xPL_createConfigurableService("hwstar", "rc65", "rc65.xpl");
-  	xPL_setServiceVersion(rc65Service, VERSION);
+	xplrcsService = xPL_createConfigurableService("hwstar", "xplrcs", "xplrcs.xpl");
+  	xPL_setServiceVersion(xplrcsService, VERSION);
 
 	/* If the configuration was not reloaded, then this is our first time and   */
 	/* we need to define what the configurables are and what the default values */
  	/* should be.                                                               */
-	if (!xPL_isServiceConfigured(rc65Service)) {
+	if (!xPL_isServiceConfigured(xplrcsService)) {
   		/* Define a configurable item and give it a default */
-		xPL_addServiceConfigurable(rc65Service, POLL_RATE_CFG_NAME, xPL_CONFIG_RECONF, 1);
+		xPL_addServiceConfigurable(xplrcsService, POLL_RATE_CFG_NAME, xPL_CONFIG_RECONF, 1);
 
-		setConfigInt(rc65Service, POLL_RATE_CFG_NAME, DEF_POLL_RATE);
+		setConfigInt(xplrcsService, POLL_RATE_CFG_NAME, DEF_POLL_RATE);
   	}
 
   	/* Parse the service configurables into a form this program */
   	/* can use (whether we read a config or not)                */
-  	parseConfig(rc65Service);
+  	parseConfig(xplrcsService);
 
  	/* Add a service change listener we'll use to pick up a new tick rate */
- 	xPL_addServiceConfigChangedListener(rc65Service, configChangedHandler, NULL);
+ 	xPL_addServiceConfigChangedListener(xplrcsService, configChangedHandler, NULL);
 
 	/*
 	* Create a status message object
 	*/
 
-  	rc65StatusMessage = xPL_createBroadcastMessage(rc65Service, xPL_MESSAGE_STATUS);
-  	xPL_setSchema(rc65StatusMessage, "rc65", "status");
+  	xplrcsStatusMessage = xPL_createBroadcastMessage(xplrcsService, xPL_MESSAGE_STATUS);
+  	xPL_setSchema(xplrcsStatusMessage, "xplrcs", "status");
 
 	/*
 	* Create a trigger message object
 	*/
 
-	rc65TriggerMessage = xPL_createBroadcastMessage(rc65Service, xPL_MESSAGE_TRIGGER);
-  	xPL_setSchema(rc65TriggerMessage, "rc65", "trigger");
+	xplrcsTriggerMessage = xPL_createBroadcastMessage(xplrcsService, xPL_MESSAGE_TRIGGER);
+  	xPL_setSchema(xplrcsTriggerMessage, "xplrcs", "trigger");
 
 
   	/* Install signal traps for proper shutdown */
@@ -621,7 +652,7 @@ int main(int argc, char *argv[])
 
 
  	/* Enable the service */
-  	xPL_setServiceEnabled(rc65Service, TRUE);
+  	xPL_setServiceEnabled(xplrcsService, TRUE);
 
 	/* Ask xPL to monitor our serial device */
 	if(xPL_addIODevice(serioHandler, 1234, serio_fd(serioStuff), TRUE, FALSE, FALSE) == FALSE)

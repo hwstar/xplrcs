@@ -1,5 +1,5 @@
 /*
-*    rc65 - an RC-65 RS-485 thermostat to xPL bridge
+*    xplrcs - an RCS RS-485 thermostat to xPL bridge
 *    Copyright (C) 2012  Stephen A. Rodgers
 *
 *    This program is free software: you can redistribute it and/or modify
