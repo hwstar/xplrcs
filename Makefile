@@ -1,6 +1,6 @@
 # Makefile
 
-PACKAGE = rc65
+PACKAGE = xplrcs
 VERSION = 0.0.1
 CONTACT = <hwstar@rodgers.sdcoxmail.com>
 
