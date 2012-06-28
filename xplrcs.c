@@ -42,6 +42,28 @@
 #define DEF_POLL_RATE		5
 #define DEF_COM_PORT		"/dev/ttyS0"
 
+/* 
+* Command types
+*/
+
+typedef enum {CMDTYPE_TRANSP} CmdType_t;
+
+
+/*
+* Command queueing structure
+*/
+
+typedef struct cmd_entry CmdEntry_t;
+
+struct cmd_entry {
+	String cmd;
+	CmdType_t type;
+	CmdEntry_t *prev;
+	CmdEntry_t *next;
+};
+
+	
+
 
 char *progName;
 int debugLvl = 0; 
@@ -49,6 +71,10 @@ Bool noBackground = FALSE;
 int xplrcsAddress = 1;
 int pollRate = 5;
 Bool pollPending = FALSE;
+CmdEntry_t *cmdEntryHead = NULL;
+CmdEntry_t *cmdEntryTail = NULL;
+
+
 
 static seriostuff_t *serioStuff = NULL;
 static xPL_ServicePtr xplrcsService = NULL;
@@ -197,6 +223,77 @@ static int parseRC65Status(String ws, String *list, int limit)
 }
 
 /*
+* Queue a command entry
+*/
+
+static void queueCommand( String cmd, CmdType_t type )
+{
+	CmdEntry_t *newCE = malloc(sizeof(CmdEntry_t));
+	/* Did malloc succeed ? */
+	if(!newCE)
+		fatal("malloc() failed in queueCommand");
+	else
+		memset(newCE, 0, sizeof(CmdEntry_t)); /* Zero it out */
+	/* Dup the command string */
+	newCE->cmd = strdup(cmd);
+
+	if(!newCE->cmd) /* Did strdup succeed? */
+		fatal("strdup() failed in queueCommand");
+
+	/* Save the type */
+	newCE->type = type;
+
+	if(!cmdEntryHead){ /* Empty list */
+		cmdEntryHead = cmdEntryTail =  newCE;
+	}
+	else{ /* List not empty */
+		cmdEntryTail->next = newCE;
+		newCE->prev = cmdEntryTail;
+		cmdEntryTail = newCE;
+	}
+
+}
+
+/*
+* Dequeue a command entry
+*/
+
+static CmdEntry_t *dequeueCommand()
+{
+	CmdEntry_t *entry;
+
+	if(!cmdEntryHead){
+		entry = NULL;
+	}
+	else if(cmdEntryHead == cmdEntryTail){
+		entry = cmdEntryHead;
+		entry->prev = entry->next = cmdEntryHead = cmdEntryTail = NULL;
+	}
+	else{
+		entry = cmdEntryHead;
+		cmdEntryHead = cmdEntryHead->next;
+		entry->prev = entry->next = cmdEntryHead->prev = NULL;	
+	}
+	return entry;
+
+}
+
+/*
+* Free a command entry
+*/
+
+static void freeCommand( CmdEntry_t *e)
+{
+	if(e){
+		if(e->cmd)
+			free(e->cmd);
+		free(e);
+	}
+}
+	
+
+
+/*
 * Our Listener 
 */
 
@@ -213,8 +310,8 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 			const String const class = xPL_getSchemaClass(theMessage); 
 			debug(DEBUG_EXPECTED, "Command Received: Type = %s, Class = %s", type, class);
 			if(!strcmp(class,"xplrcs")){
-				if((!strcmp(type, "basic"))||(!strcmp(type, "request"))){
-					debug(DEBUG_EXPECTED, "We have a command request");
+				if(!strcmp(type, "transp")){
+					debug(DEBUG_EXPECTED, "We have a transparent command schema");
 					if(!(ws = malloc(WS_SIZE)))
 						fatal("Cannot allocate work string in xPLListener");
 					ws[0] = 0;
@@ -237,12 +334,10 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 								charsInBuffer++;
 							}
 						}
-						/* Uppercase the command string */
-						str2Upper(ws);
 						debug(DEBUG_EXPECTED, "Parsed xplrcs command: %s", ws);
 						/* send the command */
 						/* Add a return for the benefit of the RCS controller */
-						serio_printf(serioStuff, "%s\r", ws);
+						queueCommand(ws, CMDTYPE_TRANSP);
 					}
 					free(ws);
 				}
@@ -362,21 +457,29 @@ static void serioHandler(int fd, int revents, int userValue)
 
 
 /*
-* Our time out handler. 
-* This is used to synchonize the sending of data to the RC65.
+* Our tick handler. 
+* This is used to synchonize the sending of data to the RCS thermostat.
 */
 
 static void tickHandler(int userVal, xPL_ObjectPtr obj)
 {
+	CmdEntry_t *cmdEntry;
 	static short pollCtr = 0;
+
 
 	pollCtr++;
 
 	debug(DEBUG_EXPECTED, "TICK: %d", pollCtr);
 	/* Process clock tick update checking */
 
-	
-	if(pollCtr >= pollRate){
+	if((cmdEntry = dequeueCommand())){ /* If command pending */
+		/* Uppercase the command string */
+		str2Upper(cmdEntry->cmd);
+		debug(DEBUG_EXPECTED, "Sending command: %s", cmdEntry->cmd);
+		serio_printf(serioStuff, "%s\r", cmdEntry->cmd);
+		freeCommand(cmdEntry);
+	}	
+	else if(pollCtr >= pollRate){ /* Else check poll counter */
 		pollCtr = 0;
 		debug(DEBUG_ACTION, "Polling Status...");
 		serio_printf(serioStuff, "A=%d R=1\r", xplrcsAddress);
