@@ -253,7 +253,7 @@ int serio_nb_line_read(seriostuff_t *serio)
 					serio->line[serio->pos++] = c;
 			}
 			else{
-				debug(DEBUG_EXPECTED, "Line received");
+				debug(DEBUG_ACTION, "Line received");
 				serio->line[serio->pos] = 0;
 				serio->pos = 0;
 				return TRUE;
