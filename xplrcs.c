@@ -107,6 +107,18 @@ static const String const basicCommandList[] = {
 	NULL
 };
 
+
+/* Request command list */
+
+static const String const requestCommandList[] = {
+	"gateinfo",
+	"zonelist",
+	"zoneinfo",
+	"setpoint",
+	NULL
+};
+
+
 /* Heating and cooling modes */
 
 static const String const modeList[] = {
@@ -140,6 +152,14 @@ static const String const fanModeList[] = {
 static const String const fanModeCommands[] = {
 	" FM=0",
 	" FM=1",
+	NULL
+};
+
+/* List of valid set points */
+
+static const String const setPointList[] = {
+	"heat",
+	"cool",
 	NULL
 };
 
@@ -343,7 +363,6 @@ static int matchCommand(const String const *commandList, const String const comm
 	int i;
 
 	for(i = 0; commandList[i]; i++){
-		/* debug(DEBUG_ACTION, "command = %s, commandList[%d] = %s", command, i, commandList[i]); */
 		if(!strcmp(command, commandList[i]))
 			break;
 	}
@@ -351,10 +370,34 @@ static int matchCommand(const String const *commandList, const String const comm
 }
 
 /*
+* Make a comma delimited string from a NULL terminated array of string pointers
+*/
+
+
+static String makeCommaList(String ws, const String const *list)
+{
+	int i;
+
+	if(!list || !ws)
+		return NULL;
+
+	ws[0] = 0;
+
+	for(i = 0; list[i]; i++){
+		if(i)
+			strcat(ws, ",");
+		strcat(ws, list[i]);
+	}
+
+	return ws;
+}
+
+
+/*
 * Command hander for hvac-mode
 */
 
-String doHVACMode(String ws, xPL_MessagePtr theMessage, const String const zone)
+static String doHVACMode(String ws, xPL_MessagePtr theMessage, const String const zone)
 {
 	String res = NULL;
 	int i;
@@ -373,7 +416,7 @@ String doHVACMode(String ws, xPL_MessagePtr theMessage, const String const zone)
 * Command handler for fan mode
 */
 
-String doFanMode(String ws, xPL_MessagePtr theMessage, const String const zone)
+static String doFanMode(String ws, xPL_MessagePtr theMessage, const String const zone)
 {
 	String res = NULL;
 	int i;
@@ -387,6 +430,67 @@ String doFanMode(String ws, xPL_MessagePtr theMessage, const String const zone)
 	}
 	return res;
 }
+
+
+/*
+* Return Gateway info 
+*/
+
+static void doGateInfo()
+{
+	xPL_clearMessageNamedValues(xplrcsStatusMessage);
+
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "protocol", "RCS");
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "description", "xPL to RCS bridge");
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "version", VERSION);
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "author", "Stephen A. Rodgers");
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "info-url", "http://xpl.ohnosec.org");
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "zone-count", "1");
+
+	if(!xPL_sendMessage(xplrcsStatusMessage))
+		debug(DEBUG_UNEXPECTED, "request.zoneinfo statuc transmission failed");
+}
+
+/*
+* Return Zone List
+*/
+
+static void doZoneList()
+{
+	xPL_clearMessageNamedValues(xplrcsStatusMessage);
+
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "zone-count", "1");
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "zone-list", "thermostat");
+
+	if(!xPL_sendMessage(xplrcsStatusMessage))
+		debug(DEBUG_UNEXPECTED, "request.zoneinfo statuc transmission failed");
+}
+
+/*
+* Return Zone Info
+*/
+
+static void doZoneInfo(String ws, const String const zone)
+{
+
+	/* Bail on NULL pointers */
+
+	if(!zone || !ws)
+		return;
+
+	xPL_clearMessageNamedValues(xplrcsStatusMessage);
+
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "zone", "thermostat");
+
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "command-list", makeCommaList(ws, basicCommandList));
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "hvac-mode-list", makeCommaList(ws, modeList));
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "fan-mode-list", makeCommaList(ws, fanModeList));
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "setpoint-list", makeCommaList(ws, setPointList));
+
+	if(!xPL_sendMessage(xplrcsStatusMessage))
+		debug(DEBUG_UNEXPECTED, "request.zoneinfo statuc transmission failed");
+}
+
 
 
 
@@ -408,11 +512,15 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 		if(xPL_MESSAGE_COMMAND == xPL_getMessageType(theMessage)){ /* If the message is a command */
 			const String const type = xPL_getSchemaType(theMessage);
 			const String const class = xPL_getSchemaClass(theMessage);
+			const String const command =  xPL_getMessageNamedValue(theMessage, "command");
+			const String const zone =  xPL_getMessageNamedValue(theMessage, "zone");
+
+
 			if(!(ws = malloc(WS_SIZE)))
 				fatal("Cannot allocate work string in xPLListener");
 			ws[0] = 0;
- 
-			debug(DEBUG_EXPECTED, "Command Received: Type = %s, Class = %s", type, class);
+		
+
 			if(!strcmp(class,"hvac")){
 				if(!strcmp(type, "transp")){ /* Transparent schema */
 					debug(DEBUG_ACTION, "We have a transparent command schema");
@@ -442,36 +550,62 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 					}
 				}
 				else if(!strcmp(type, "basic")){ /* Basic command schema */
-					const String const command = xPL_getMessageNamedValue(theMessage, "command");
-					if(command){
-						const String const zone = xPL_getMessageNamedValue(theMessage, "zone");
-						if(zone){ /* If valid zone */
-							/* FIXME Map zone to address here */
-							strcat(ws, "A=1");
-							switch(matchCommand(basicCommandList, command)){
-								case 0: /* hvac-mode */
-									cmd = doHVACMode(ws, theMessage, zone);
-									break;
+					if(command && zone){
+						if(zone){
+							// FIXME Zone logic missing
+							strcpy(ws, "A=1");
+						}
+						switch(matchCommand(basicCommandList, command)){
+							case 0: /* hvac-mode */
+								cmd = doHVACMode(ws, theMessage, zone);
+								break;
 
-								case 1: /* fan-mode */
-									cmd = doFanMode(ws, theMessage, zone);
-									break;
+							case 1: /* fan-mode */
+								cmd = doFanMode(ws, theMessage, zone);
+								break;
 					
-								default:
-									debug(DEBUG_UNEXPECTED, "Unrecognized command: %s", command);
-									break;
-							}
+							default:
+								break;
 						}
-						if(cmd){
-							queueCommand(cmd, CMDTYPE_BASIC); /* Queue the command */
-						}
-
+					}
+					if(cmd){
+						queueCommand(cmd, CMDTYPE_BASIC); /* Queue the command */
 					}
 					else{
 						debug(DEBUG_UNEXPECTED, "No command key in message");
 					}
 				}
 				else if(!strcmp(type, "request")){ /* Request command schema */
+					if(command){
+						switch(matchCommand(requestCommandList, command)){
+
+							case 0: /* gateinfo */
+								doGateInfo();
+								break;
+
+							case 1: /* zonelist */
+								doZoneList();
+								break;
+
+							case 2: /* zoneinfo */
+								doZoneInfo( ws, zone );
+								break;
+
+							case 4: /* setpoint */
+								break;
+
+							default:
+								break;
+						}
+								
+					}
+
+						
+
+					
+				
+
+
 				}
 			}
 			free(ws);
