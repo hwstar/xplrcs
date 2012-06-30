@@ -46,7 +46,7 @@
 * Command types
 */
 
-typedef enum {CMDTYPE_TRANSP} CmdType_t;
+typedef enum {CMDTYPE_TRANSP, CMDTYPE_BASIC} CmdType_t;
 
 
 /*
@@ -99,6 +99,49 @@ static struct option longOptions[] = {
   {0, 0, 0, 0}
 };
 
+/* Basic command list */
+
+static const String const basicCommandList[] = {
+	"hvac-mode",
+	"fan-mode",
+	NULL
+};
+
+/* Heating and cooling modes */
+
+static const String const modeList[] = {
+	"off",
+	"heat",
+	"cool",
+	"auto",
+	NULL
+};
+
+/* Commands for modes */
+
+static const String const modeCommands[] = {
+	" M=O",
+	" M=H",
+	" M=C",
+	" M=A",
+	NULL
+};	
+
+/* Fan modes  */
+
+static const String const fanModeList[] = {
+	"auto",
+	"on",
+	NULL
+};
+
+/* Commands for fan modes */
+
+static const String const fanModeCommands[] = {
+	" FM=0",
+	" FM=1",
+	NULL
+};
 
 
 /*
@@ -290,31 +333,89 @@ static void freeCommand( CmdEntry_t *e)
 		free(e);
 	}
 }
-	
+
+/*
+* Match a command from a NULL-terminated list, return index to list entry
+*/
+
+static int matchCommand(const String const *commandList, const String const command)
+{
+	int i;
+
+	for(i = 0; commandList[i]; i++){
+		/* debug(DEBUG_ACTION, "command = %s, commandList[%d] = %s", command, i, commandList[i]); */
+		if(!strcmp(command, commandList[i]))
+			break;
+	}
+	return i;	
+}
+
+/*
+* Command hander for hvac-mode
+*/
+
+String doHVACMode(String ws, xPL_MessagePtr theMessage, const String const zone)
+{
+	String res = NULL;
+	int i;
+	const String const mode = xPL_getMessageNamedValue(theMessage, "mode");
+
+	if(mode){
+		i = matchCommand(modeList, mode);
+		if(modeList[i]){
+			res = strcat(ws, modeCommands[i]);
+		}
+	}
+	return res;
+}
+
+/*
+* Command handler for fan mode
+*/
+
+String doFanMode(String ws, xPL_MessagePtr theMessage, const String const zone)
+{
+	String res = NULL;
+	int i;
+	const String const mode = xPL_getMessageNamedValue(theMessage, "mode");
+
+	if(mode){
+		i = matchCommand(fanModeList, mode);
+		if(fanModeList[i]){
+			res = strcat(ws, fanModeCommands[i]);
+		}
+	}
+	return res;
+}
+
 
 
 /*
 * Our Listener 
 */
 
+
+
 static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 {
-	int i,nvCount,charsInBuffer;
-	String p,ws;
+	int i, nvCount, charsInBuffer;
+	String p, ws, cmd = NULL;
 	xPL_NameValueListPtr msgBody;
+
 	
 
 	if(!xPL_isBroadcastMessage(theMessage)){ /* If not a broadcast message */
 		if(xPL_MESSAGE_COMMAND == xPL_getMessageType(theMessage)){ /* If the message is a command */
 			const String const type = xPL_getSchemaType(theMessage);
-			const String const class = xPL_getSchemaClass(theMessage); 
+			const String const class = xPL_getSchemaClass(theMessage);
+			if(!(ws = malloc(WS_SIZE)))
+				fatal("Cannot allocate work string in xPLListener");
+			ws[0] = 0;
+ 
 			debug(DEBUG_EXPECTED, "Command Received: Type = %s, Class = %s", type, class);
-			if(!strcmp(class,"xplrcs")){
-				if(!strcmp(type, "transp")){
-					debug(DEBUG_EXPECTED, "We have a transparent command schema");
-					if(!(ws = malloc(WS_SIZE)))
-						fatal("Cannot allocate work string in xPLListener");
-					ws[0] = 0;
+			if(!strcmp(class,"hvac")){
+				if(!strcmp(type, "transp")){ /* Transparent schema */
+					debug(DEBUG_ACTION, "We have a transparent command schema");
 
 					/* Append the controller address */
 					sprintf(ws, "A=%d ", xplrcsAddress);
@@ -334,15 +435,48 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 								charsInBuffer++;
 							}
 						}
-						debug(DEBUG_EXPECTED, "Parsed xplrcs command: %s", ws);
+						debug(DEBUG_ACTION, "Parsed xplrcs command: %s", ws);
 						/* send the command */
 						/* Add a return for the benefit of the RCS controller */
 						queueCommand(ws, CMDTYPE_TRANSP);
 					}
-					free(ws);
+				}
+				else if(!strcmp(type, "basic")){ /* Basic command schema */
+					const String const command = xPL_getMessageNamedValue(theMessage, "command");
+					if(command){
+						const String const zone = xPL_getMessageNamedValue(theMessage, "zone");
+						if(zone){ /* If valid zone */
+							/* FIXME Map zone to address here */
+							strcat(ws, "A=1");
+							switch(matchCommand(basicCommandList, command)){
+								case 0: /* hvac-mode */
+									cmd = doHVACMode(ws, theMessage, zone);
+									break;
+
+								case 1: /* fan-mode */
+									cmd = doFanMode(ws, theMessage, zone);
+									break;
+					
+								default:
+									debug(DEBUG_UNEXPECTED, "Unrecognized command: %s", command);
+									break;
+							}
+						}
+						if(cmd){
+							queueCommand(cmd, CMDTYPE_BASIC); /* Queue the command */
+						}
+
+					}
+					else{
+						debug(DEBUG_UNEXPECTED, "No command key in message");
+					}
+				}
+				else if(!strcmp(type, "request")){ /* Request command schema */
 				}
 			}
+			free(ws);
 		}
+
 	}
 }
 
