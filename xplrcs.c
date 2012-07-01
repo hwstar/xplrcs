@@ -34,14 +34,13 @@
 #include "serio.h"
 #include "notify.h"
 
-#define SHORT_OPTIONS "a:d:hi:l:np:v"
+#define SHORT_OPTIONS "a:d:hi:l:np:s:v"
 
 #define WS_SIZE 256
 
-#define POLL_RATE_CFG_NAME	"prate"
-#define DEF_POLL_RATE		5
 #define DEF_COM_PORT		"/dev/ttyS0"
 #define DEF_ZONE		"thermostat"
+#define DEF_INSTANCE_ID		"hvac"
 
 /* 
 * Command types
@@ -90,12 +89,14 @@ static char comPort[WS_SIZE] = DEF_COM_PORT;
 static char interface[WS_SIZE] = "";
 static char logPath[WS_SIZE] = "";
 static char lastLine[WS_SIZE]; 
+static char instanceID[WS_SIZE] = DEF_INSTANCE_ID;
 
 /* Commandline options. */
 
 static struct option longOptions[] = {
   {"address", 1, 0, 'a'},
   {"com-port", 1, 0, 'p'},
+  {"config",1, 0, 'c'},
   {"debug", 1, 0, 'd'},
   {"help", 0, 0, 'h'},
   {"interface", 1, 0, 'i'},
@@ -111,6 +112,7 @@ static const String const basicCommandList[] = {
 	"hvac-mode",
 	"fan-mode",
 	"setpoint",
+	"display",
 	NULL
 };
 
@@ -179,6 +181,13 @@ static const String const setPointCommands[] = {
 	NULL
 };
 
+/* List of valid display keywords */
+
+static const String const displayList[] = {
+	"outside-temp",
+	"lock",
+	NULL
+};
 
 /*
 * Change string to upper case
@@ -193,62 +202,6 @@ static String str2Upper(char *q)
 		for (p = q; *p; ++p) *p = toupper(*p);
 	}
 	return q;
-}
-
-
-
-
-
-/*
-* Set a config integer value
-*/
-
-static void setConfigInt(xPL_ServicePtr theService, String theName, int theInt)
-{
-	char stringRep[18];
-	sprintf(stringRep, "%d", theInt);
-	xPL_setServiceConfigValue(theService, theName, stringRep);
-}
-
-/*
-* Get a config integer value
-*/
-
-static int getConfigInt(xPL_ServicePtr theService, String theName)
-{
-	return atoi(xPL_getServiceConfigValue(theService, theName));
-}
-
-
-/*
-* Parse config change request 
-*/
-
-
-static void parseConfig(xPL_ServicePtr theService)
-{
-
-	int newPRate = getConfigInt(theService, POLL_RATE_CFG_NAME);
-
-
-	/* Handle bad configurable (override it) */
-	if ((newPRate < 1) || newPRate > 60) {
-		setConfigInt(theService, POLL_RATE_CFG_NAME, pollRate );
-		return;
-	}
-
-	/* Install new poll rate */
-	pollRate = newPRate;
-}
-
-/*
-* Handle config change requests
-*/
-
-static void configChangedHandler(xPL_ServicePtr theService, xPL_ObjectPtr userData)
-{
-  	/* Read config items for service and install */
-  	parseConfig(theService);
 }
 
 /*
@@ -498,6 +451,41 @@ static String doSetSetpoint(String ws, xPL_MessagePtr theMessage, const String c
 
 
 
+/*
+* Send a display update command
+*/
+
+static String doDisplay(String ws, xPL_MessagePtr theMessage, const String const zone)
+{
+	String val, state, res = NULL;
+
+	if(!ws || !zone || !theMessage)
+		return res;
+
+	/* Outside Temperature */
+	val = xPL_getMessageNamedValue(theMessage, displayList[0]);
+	if(val){
+		res = val;
+		sprintf(ws+strlen(ws), " OT=%s", val);
+	}
+
+	/* Display lock */
+	val = xPL_getMessageNamedValue(theMessage, displayList[1]);
+	if(val){
+		if(!strcmp(val, "on"))
+			state = "1";
+		else
+			state = "0";
+		res = val;
+		sprintf(ws+strlen(ws), " DL=%s", state);
+	}
+
+	return res;	
+}
+
+
+
+
 
 /*
 * Return Gateway info 
@@ -557,6 +545,7 @@ static void doZoneInfo(String ws, const String const zone)
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "hvac-mode-list", makeCommaList(ws, modeList));
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "fan-mode-list", makeCommaList(ws, fanModeList));
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "setpoint-list", makeCommaList(ws, setPointList));
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "display-list", makeCommaList(ws, displayList));
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "scale", "fahrenheit");
 
 	if(!xPL_sendMessage(xplrcsStatusMessage))
@@ -596,11 +585,16 @@ static void doGetSetPoint(String ws, xPL_MessagePtr theMessage, const String con
 
 static void doZoneResponse(String ws, const String const zone)
 {
-	if(!zone || !ws)
+
+	if(!zone  || !ws)
 		return;
+	
 	sprintf(ws + strlen(ws), " R=1");
 	queueCommand( ws, CMDTYPE_RQ_ZONE);
 }
+
+
+
 
 
 /*
@@ -650,6 +644,10 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 
 							case 2: /* setpoint */
 								cmd = doSetSetpoint(ws, theMessage, zone);
+								break;
+
+							case 3: /* display */
+								cmd = doDisplay(ws, theMessage, zone);
 								break;
 					
 							default:
@@ -985,21 +983,22 @@ static void tickHandler(int userVal, xPL_ObjectPtr obj)
 
 void showHelp(void)
 {
-	printf("'%s' is a daemon that bridges xPL to xplrcs thermostats\n", progName);
+	printf("'%s' is a daemon that bridges the xPL protocol to single zone addressable RCS thermostats\n", progName);
 	printf("via an RS-232 or RS-485 interface\n");
 	printf("\n");
 	printf("Usage: %s [OPTION]...\n", progName);
 	printf("\n");
-	printf("  -a, --address ADDR      Set the address for the RC-65 thermostat\n");
+	printf("  -a, --address ADDR      Set the address for the RCS thermostat\n");
 	printf("                          (Valid addresses are 0 - 255, %d is the default)\n", xplrcsAddress); 
 	printf("  -d, --debug LEVEL       Set the debug level, 0 is off, the\n");
 	printf("                          compiled-in default is %d and the max\n", debugLvl);
 	printf("                          level allowed is %d\n", DEBUG_MAX);
 	printf("  -h, --help              Shows this\n");
 	printf("  -i, --interface NAME    Set the broadcast interface (e.g. eth0)\n");
-	printf("  -l, --log  PATH         Path name to log file when daemonized\n");
+	printf("  -l, --log  PATH         Path name to debug log file when daemonized\n");
 	printf("  -n, --no-background     Do not fork into the background (useful for debugging)\n");
 	printf("  -p, --com-port PORT     Set the communications port (default is %s)\n", comPort);
+	printf("  -s, --instance ID       Set instance id. Default is %s", instanceID);
 	printf("  -v, --version           Display program version\n");
 	printf("\n");
  	printf("Report bugs to <%s>\n\n", EMAIL);
@@ -1045,7 +1044,6 @@ int main(int argc, char *argv[])
 				}
 				break;
 
-        
 			/* Was it a debug level set? */
 			case 'd':
 
@@ -1078,7 +1076,6 @@ int main(int argc, char *argv[])
 
 				break;
 
-
 			/* Was it a no-backgrounding request? */
 			case 'n':
 
@@ -1093,6 +1090,13 @@ int main(int argc, char *argv[])
 				debug(DEBUG_ACTION,"New com port is: %s",
 				comPort);
 
+				break;
+
+			/* Was it an instance ID ? */
+			case 's':
+				strncpy(instanceID, optarg, WS_SIZE);
+				instanceID[WS_SIZE -1] = 0;
+				debug(DEBUG_ACTION,"New instance ID is: %s", instanceID);
 				break;
 
 
@@ -1193,26 +1197,9 @@ int main(int argc, char *argv[])
 
 	/* Initialze xplrcs service */
 
-	/* Create a configurable service and set our application version */
-	xplrcsService = xPL_createConfigurableService("hwstar", "xplrcs", "xplrcs.xpl");
+	/* Create a service and set our application version */
+	xplrcsService = xPL_createService("hwstar", "xplrcs", instanceID);
   	xPL_setServiceVersion(xplrcsService, VERSION);
-
-	/* If the configuration was not reloaded, then this is our first time and   */
-	/* we need to define what the configurables are and what the default values */
- 	/* should be.                                                               */
-	if (!xPL_isServiceConfigured(xplrcsService)) {
-  		/* Define a configurable item and give it a default */
-		xPL_addServiceConfigurable(xplrcsService, POLL_RATE_CFG_NAME, xPL_CONFIG_RECONF, 1);
-
-		setConfigInt(xplrcsService, POLL_RATE_CFG_NAME, DEF_POLL_RATE);
-  	}
-
-  	/* Parse the service configurables into a form this program */
-  	/* can use (whether we read a config or not)                */
-  	parseConfig(xplrcsService);
-
- 	/* Add a service change listener we'll use to pick up a new tick rate */
- 	xPL_addServiceConfigChangedListener(xplrcsService, configChangedHandler, NULL);
 
 	/*
 	* Create a status message object
@@ -1252,10 +1239,6 @@ int main(int argc, char *argv[])
 	usleep(100000);
 	serio_flush_input(serioStuff);
 
-
- 	/* Enable the service */
-  	xPL_setServiceEnabled(xplrcsService, TRUE);
-
 	/* Ask xPL to monitor our serial device */
 	if(xPL_addIODevice(serioHandler, 1234, serio_fd(serioStuff), TRUE, FALSE, FALSE) == FALSE)
 		fatal("Could not register serial I/O fd with xPL");
@@ -1265,6 +1248,10 @@ int main(int argc, char *argv[])
 
   	/* And a listener for all xPL messages */
   	xPL_addMessageListener(xPLListener, NULL);
+
+
+ 	/* Enable the service */
+  	xPL_setServiceEnabled(xplrcsService, TRUE);
 
 
 
