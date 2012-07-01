@@ -82,6 +82,10 @@ static seriostuff_t *serioStuff = NULL;
 static xPL_ServicePtr xplrcsService = NULL;
 static xPL_MessagePtr xplrcsStatusMessage = NULL;
 static xPL_MessagePtr xplrcsTriggerMessage = NULL;
+static xPL_MessagePtr xplrcsZoneTriggerMessage = NULL;
+static xPL_MessagePtr xplrcsHeatSetPointTriggerMessage = NULL;
+static xPL_MessagePtr xplrcsCoolSetPointTriggerMessage = NULL;
+
 static char comPort[WS_SIZE] = DEF_COM_PORT;
 static char interface[WS_SIZE] = "";
 static char logPath[WS_SIZE] = "";
@@ -175,21 +179,6 @@ static const String const setPointCommands[] = {
 	NULL
 };
 
-
-/*
-* Change string to lower case
-* Warning: String must be nul terminated.
-*/
-
-static String str2Lower(char *q)
-{
-	char *p;
-			
-	if(q){
-		for (p = q; *p; ++p) *p = tolower(*p);
-	}
-	return q;
-}
 
 /*
 * Change string to upper case
@@ -726,10 +715,15 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 
 static void serioHandler(int fd, int revents, int userValue)
 {
+	Bool sendZoneTrigger = FALSE;
+	Bool sendHeatSetPointTrigger = FALSE;
+	Bool sendCoolSetPointTrigger = FALSE;
+	static Bool firstTime = TRUE;
 	int curArgc,lastArgc, sendAll = FALSE, i;
 	String line;
 	String pd,wscur,wslast,arg;
 	String queryZone = NULL;
+	String val = NULL;
 	String curArgList[20];
 	String lastArgList[20];
 
@@ -743,9 +737,22 @@ static void serioHandler(int fd, int revents, int userValue)
 			pollPending = FALSE;
 			/* Has to be a response to a poll */
 			/* Compare with last line received */
-			if(strcmp(line, lastLine)){
+			if(!firstTime && strcmp(line, lastLine)){
 				/* Clear any old name/values */
 				debug(DEBUG_STATUS, "Got updated poll status: %s", line);
+				queryZone = DEF_ZONE;
+
+				/* Prepare Zone trigger message */
+				xPL_clearMessageNamedValues(xplrcsZoneTriggerMessage);
+				xPL_setMessageNamedValue(xplrcsZoneTriggerMessage, "zone", queryZone);
+
+				/* Prepare Setpoint trigger messages */
+				xPL_clearMessageNamedValues(xplrcsHeatSetPointTriggerMessage);
+				xPL_setMessageNamedValue(xplrcsHeatSetPointTriggerMessage, "zone", queryZone);
+				xPL_clearMessageNamedValues(xplrcsCoolSetPointTriggerMessage);
+				xPL_setMessageNamedValue(xplrcsCoolSetPointTriggerMessage, "zone", queryZone);
+
+
 
 				/* Make working strings from the current and list lines */
 				wscur = strdup(line);
@@ -775,24 +782,74 @@ static void serioHandler(int fd, int revents, int userValue)
 							sendAll = TRUE;
 							continue;
 						}
-						str2Lower(arg); /* Lower case arg */
 						*pd = 0;
 						pd++;
-						if(strcmp(arg, "a")){ /* Do not send address arg */
-							debug(DEBUG_STATUS, "Adding: key = %s, value = %s", arg, pd);
-							/* Set key and value */
+						if(!strcmp(arg, "SPH")){
+							sendHeatSetPointTrigger = TRUE;
+							xPL_setMessageNamedValue(xplrcsHeatSetPointTriggerMessage, "setpoint", setPointList[0]);
+							xPL_setMessageNamedValue(xplrcsHeatSetPointTriggerMessage, "temperature", pd );
 						}
-					}
+
+						else if(!strcmp(arg, "SPC")){
+							sendCoolSetPointTrigger = TRUE;
+							xPL_setMessageNamedValue(xplrcsCoolSetPointTriggerMessage, "setpoint", setPointList[1]);
+							xPL_setMessageNamedValue(xplrcsCoolSetPointTriggerMessage, "temperature", pd );
+						}
+						else if(!strcmp(arg, "FM")){
+							sendZoneTrigger = TRUE;
+							if(!strcmp(pd, "0"))
+								val = fanModeList[0];
+							else
+								val = fanModeList[1];
+							xPL_setMessageNamedValue(xplrcsZoneTriggerMessage, "fan-mode", val);
+						}
+						else if(!strcmp(arg, "M")){
+							sendZoneTrigger = TRUE;
+							if(!strcmp(pd, "O"))
+								val = modeList[0];
+							else if(!strcmp(pd, "H"))
+								val = modeList[1];
+							else if(!strcmp(pd, "C"))
+								val = modeList[2];
+							else if(!strcmp(pd, "A"))
+								val = modeList[3];
+							else
+								val = "?";
+							xPL_setMessageNamedValue(xplrcsZoneTriggerMessage,"hvac-mode", val);
+						}
+						else if(!strcmp(arg, "T")){
+							sendZoneTrigger = TRUE;
+							xPL_setMessageNamedValue(xplrcsZoneTriggerMessage,"temperature", pd);
+						}
+					} /* End if */
+
+
+				} /* End for */
+				if(sendCoolSetPointTrigger){
+					if(!xPL_sendMessage(xplrcsCoolSetPointTriggerMessage))
+						debug(DEBUG_UNEXPECTED, "Cool Set point trigger message transmission failed");
+				}
+				if(sendHeatSetPointTrigger){
+					if(!xPL_sendMessage(xplrcsHeatSetPointTriggerMessage))
+						debug(DEBUG_UNEXPECTED, "Heat Set point trigger message transmission failed");
 
 				}
+				if(sendZoneTrigger){
+					if(!xPL_sendMessage(xplrcsZoneTriggerMessage))
+						debug(DEBUG_UNEXPECTED, "Zone trigger message transmission failed");
+				}
+
+
 				/* Free working strings */
 				free(wscur);
 				free(wslast);
 
-				/* Copy current string into last string for future comparisons */	
-				strncpy(lastLine, line, WS_SIZE);
-				lastLine[WS_SIZE - 1] = 0;
+				
 			}
+			/* Copy current string into last string for future comparisons */	
+			strncpy(lastLine, line, WS_SIZE);
+			lastLine[WS_SIZE - 1] = 0;
+			firstTime = FALSE;
 		} /* End if(pollPending) */
 		else{
 			/* It's a response not related to a poll */
@@ -806,7 +863,6 @@ static void serioHandler(int fd, int revents, int userValue)
 			/* If it was a set point request */
 			if((lastCmdType == CMDTYPE_RQ_SETPOINT_HEAT)||(lastCmdType == CMDTYPE_RQ_SETPOINT_COOL)){
 				char wc[20];
-				String val = NULL;
 				debug(DEBUG_EXPECTED,"Setpoint Status requested"); 
 				xPL_setSchema(xplrcsStatusMessage, "hvac", "setpoint");
 				xPL_clearMessageNamedValues(xplrcsStatusMessage);
@@ -827,7 +883,6 @@ static void serioHandler(int fd, int revents, int userValue)
 			/* If it was a zone info request */
 			else if(lastCmdType == CMDTYPE_RQ_ZONE){
 				char wc[20];
-				String val = NULL;
 				debug(DEBUG_EXPECTED,"Zone Status requested"); 
 				xPL_setSchema(xplrcsStatusMessage, "hvac", "zone");
 				xPL_clearMessageNamedValues(xplrcsStatusMessage);
@@ -1164,14 +1219,22 @@ int main(int argc, char *argv[])
 	*/
 
   	xplrcsStatusMessage = xPL_createBroadcastMessage(xplrcsService, xPL_MESSAGE_STATUS);
-  	xPL_setSchema(xplrcsStatusMessage, "xplrcs", "status");
-
+  
 	/*
-	* Create a trigger message object
+	* Create trigger message objects
 	*/
 
 	xplrcsTriggerMessage = xPL_createBroadcastMessage(xplrcsService, xPL_MESSAGE_TRIGGER);
-  	xPL_setSchema(xplrcsTriggerMessage, "xplrcs", "trigger");
+
+	xplrcsZoneTriggerMessage = xPL_createBroadcastMessage(xplrcsService, xPL_MESSAGE_TRIGGER);
+	xPL_setSchema(xplrcsZoneTriggerMessage, "hvac", "zone");
+
+	xplrcsHeatSetPointTriggerMessage = xPL_createBroadcastMessage(xplrcsService, xPL_MESSAGE_TRIGGER);
+ 	xPL_setSchema(xplrcsHeatSetPointTriggerMessage, "hvac", "setpoint");
+	xplrcsCoolSetPointTriggerMessage = xPL_createBroadcastMessage(xplrcsService, xPL_MESSAGE_TRIGGER);
+ 	xPL_setSchema(xplrcsCoolSetPointTriggerMessage, "hvac", "setpoint");
+
+
 
 
   	/* Install signal traps for proper shutdown */
