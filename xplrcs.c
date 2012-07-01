@@ -28,6 +28,7 @@
 #include <ctype.h>
 #include <getopt.h>
 #include <limits.h>
+#include <time.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <xPL.h>
@@ -46,7 +47,7 @@
 * Command types
 */
 
-typedef enum {CMDTYPE_NONE=0, CMDTYPE_BASIC, CMDTYPE_RQ_SETPOINT_HEAT, CMDTYPE_RQ_SETPOINT_COOL, CMDTYPE_RQ_ZONE} CmdType_t;
+typedef enum {CMDTYPE_NONE=0, CMDTYPE_BASIC, CMDTYPE_RQ_SETPOINT_HEAT, CMDTYPE_RQ_SETPOINT_COOL, CMDTYPE_RQ_ZONE, CMDTYPE_DATETIME} CmdType_t;
 
 
 /*
@@ -176,8 +177,8 @@ static const String const setPointList[] = {
 /* Commands for setpoints */
 
 static const String const setPointCommands[] = {
-	"SPH=",
-	"SPC=",
+	"SPH",
+	"SPC",
 	NULL
 };
 
@@ -427,24 +428,27 @@ static String doFanMode(String ws, xPL_MessagePtr theMessage, const String const
 static String doSetSetpoint(String ws, xPL_MessagePtr theMessage, const String const zone)
 {
 	String res = NULL;
-	int i;
+	String setpoint, temperature;
+	int cmd;
+
 	
 	if(!zone || !ws)
 		return res;
 
+	setpoint = xPL_getMessageNamedValue(theMessage, "setpoint");
+	temperature = xPL_getMessageNamedValue(theMessage, "temperature");
 
-	for(i = 0; setPointList[i] ; i++){
-
-		/* See if setpoint exists in message */
-		const String const setpoint = xPL_getMessageNamedValue(theMessage, setPointList[i]);
-
-		if(setpoint){
-			/* Setpoint command matched, set the return result */
+	if(setpoint && temperature){
+		if(!strcmp(setpoint, setPointList[0])){
 			res = ws;
-			strcat(ws, " ");
-			strcat(ws, setPointCommands[i]); /* Cat the command */
-			strcat(ws, setpoint);	/* Cat the setpoint */		
+			cmd = 0;
 		}
+		else if(!strcmp(setpoint, setPointList[1])){
+			res = ws;
+			cmd = 1;
+		}
+		if(res)
+			sprintf(ws + strlen(ws)," %s=%s", setPointCommands[cmd], temperature);
 	}
 	return res;
 }
@@ -593,8 +597,32 @@ static void doZoneResponse(String ws, const String const zone)
 	queueCommand( ws, CMDTYPE_RQ_ZONE);
 }
 
+/*
+* Send the time and date to the thermostat
+*/
 
 
+static void doSetDateTime()
+{
+	time_t now;
+	struct tm ltime;
+	char ws[WS_SIZE];
+	static int count = 0;
+
+	time(&now);
+	localtime_r(&now, &ltime);
+
+	if(count >= 3600){
+		count = 0;
+		sprintf(ws, "TIME=%02d:%02d:%02d DATE=%02d/%02d/%02d DOW=%d", ltime.tm_hour, ltime.tm_min,
+		ltime.tm_sec, ltime.tm_mon + 1, ltime.tm_mday, ltime.tm_year % 100, (ltime.tm_wday + 1));
+		debug(DEBUG_ACTION, "Time update command: %s", ws);
+		queueCommand( ws, CMDTYPE_DATETIME);
+	}
+	else
+		count++;
+
+}
 
 
 /*
@@ -949,6 +977,7 @@ static void tickHandler(int userVal, xPL_ObjectPtr obj)
 	debug(DEBUG_STATUS, "TICK: %d", pollCtr);
 	/* Process clock tick update checking */
 
+	doSetDateTime();
 
 	if(!readySent){
 		readySent = TRUE;
@@ -967,7 +996,8 @@ static void tickHandler(int userVal, xPL_ObjectPtr obj)
 		debug(DEBUG_EXPECTED, "Sending command: %s", cmdEntry->cmd);
 		serio_printf(serioStuff, "%s\r", cmdEntry->cmd);
 		freeCommand(cmdEntry);
-	}	
+	}
+
 	else if(pollCtr >= pollRate){ /* Else check poll counter */
 		pollCtr = 0;
 		debug(DEBUG_ACTION, "Polling Status...");
