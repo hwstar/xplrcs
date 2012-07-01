@@ -41,12 +41,13 @@
 #define POLL_RATE_CFG_NAME	"prate"
 #define DEF_POLL_RATE		5
 #define DEF_COM_PORT		"/dev/ttyS0"
+#define DEF_ZONE		"thermostat"
 
 /* 
 * Command types
 */
 
-typedef enum {CMDTYPE_NONE=0, CMDTYPE_BASIC, CMDTYPE_RQ_SETPOINTS} CmdType_t;
+typedef enum {CMDTYPE_NONE=0, CMDTYPE_BASIC, CMDTYPE_RQ_SETPOINT_HEAT, CMDTYPE_RQ_SETPOINT_COOL, CMDTYPE_RQ_ZONE} CmdType_t;
 
 
 /*
@@ -117,6 +118,7 @@ static const String const requestCommandList[] = {
 	"zonelist",
 	"zoneinfo",
 	"setpoint",
+	"zone",
 	NULL
 };
 
@@ -152,8 +154,8 @@ static const String const fanModeList[] = {
 /* Commands for fan modes */
 
 static const String const fanModeCommands[] = {
-	"FM=0",
-	"FM=1",
+	"F=0",
+	"F=1",
 	NULL
 };
 
@@ -296,6 +298,34 @@ static int parseRC65Status(String ws, String *list, int limit)
 }
 
 /*
+* Iterate through an arg list and return a val on a key match or else return NULL
+*/
+
+static String getVal(String ws, int wslimit, String *argList, String key)
+{
+	int i;
+	String res = NULL;
+	String v;
+
+	for(i = 0; argList[i]; i++){
+		strncpy(ws, argList[i], wslimit); /* Make a local copy we can modify */
+		ws[wslimit - 1] = 0;
+
+		if(!(v = strchr(ws, '='))) /* If there is no =, then bail */
+			break;
+		*v++ = 0;
+		if(!strncmp(ws, key, wslimit)){ /* if there is a match, set res to value and bail */
+			res = v;
+			break;
+		}
+	}
+
+	return res;
+}
+
+
+
+/*
 * Queue a command entry
 */
 
@@ -401,7 +431,6 @@ static String makeCommaList(String ws, const String const *list)
 
 	return ws;
 }
-
 
 /*
 * Command hander for hvac-mode
@@ -513,7 +542,7 @@ static void doZoneList()
 	xPL_clearMessageNamedValues(xplrcsStatusMessage);
 
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "zone-count", "1");
-	xPL_setMessageNamedValue(xplrcsStatusMessage, "zone-list", "thermostat");
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "zone-list", DEF_ZONE);
 
 	if(!xPL_sendMessage(xplrcsStatusMessage))
 		debug(DEBUG_UNEXPECTED, "request.zonelist status transmission failed");
@@ -533,7 +562,7 @@ static void doZoneInfo(String ws, const String const zone)
 	xPL_setSchema(xplrcsStatusMessage, "hvac", "zoneinfo");
 	xPL_clearMessageNamedValues(xplrcsStatusMessage);
 
-	xPL_setMessageNamedValue(xplrcsStatusMessage, "zone", "thermostat");
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "zone", DEF_ZONE);
 
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "command-list", makeCommaList(ws, basicCommandList));
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "hvac-mode-list", makeCommaList(ws, modeList));
@@ -549,15 +578,39 @@ static void doZoneInfo(String ws, const String const zone)
 * Return set point info
 */
 
-static void doGetSetPoint(String ws, const String const zone)
+static void doGetSetPoint(String ws, xPL_MessagePtr theMessage, const String const zone)
+{
+	String setpoint;
+
+	if(!zone || !ws || !theMessage)
+		return;
+
+	setpoint = xPL_getMessageNamedValue(theMessage, "setpoint");
+
+
+
+	if(setpoint){
+		sprintf(ws + strlen(ws), " R=4");
+
+		if(!strcmp(setpoint, setPointList[0])){
+			queueCommand( ws, CMDTYPE_RQ_SETPOINT_HEAT);
+		}
+		else if(!strcmp(setpoint, setPointList[1])){
+			queueCommand( ws, CMDTYPE_RQ_SETPOINT_COOL);
+		}
+	}
+}
+
+/*
+* Send a request for zone information
+*/
+
+static void doZoneResponse(String ws, const String const zone)
 {
 	if(!zone || !ws)
 		return;
-
-	sprintf(ws+ strlen(ws), " SPH=? SPC=?");
-
-	queueCommand( ws, CMDTYPE_RQ_SETPOINTS);
-
+	sprintf(ws + strlen(ws), " R=1");
+	queueCommand( ws, CMDTYPE_RQ_ZONE);
 }
 
 
@@ -638,10 +691,11 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 								break;
 
 							case 3: /* setpoint */
-								doGetSetPoint(ws, zone);
+								doGetSetPoint(ws, theMessage, zone);
 								break;
 
 							case 4: /* zone */
+								doZoneResponse(ws, zone);
 								break;
 
 							default:
@@ -665,6 +719,7 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 }
 
 
+
 /*
 * Serial I/O handler (Callback from xPL)
 */
@@ -674,8 +729,10 @@ static void serioHandler(int fd, int revents, int userValue)
 	int curArgc,lastArgc, sendAll = FALSE, i;
 	String line;
 	String pd,wscur,wslast,arg;
+	String queryZone = NULL;
 	String curArgList[20];
 	String lastArgList[20];
+
 
 	
 	/* Do non-blocking line read */
@@ -739,25 +796,82 @@ static void serioHandler(int fd, int revents, int userValue)
 		} /* End if(pollPending) */
 		else{
 			/* It's a response not related to a poll */
+			queryZone = DEF_ZONE;
+
 			if(!(wscur = strdup(line)))
 				fatal("Out of memory in serioHandler(): point 2");
+
 			debug(DEBUG_EXPECTED, "Non-poll response: %s", wscur);
 			curArgc = parseRC65Status(wscur, curArgList, 19);
-			for(i = 0; i < curArgc; i++){
-				arg = curArgList[i];
-				str2Lower(arg); /* Lower case arg */
-				if(!(pd = strchr(arg, '='))){
-					debug(DEBUG_UNEXPECTED, "Parse error in %s point 2", arg);
-					continue;
+			/* If it was a set point request */
+			if((lastCmdType == CMDTYPE_RQ_SETPOINT_HEAT)||(lastCmdType == CMDTYPE_RQ_SETPOINT_COOL)){
+				char wc[20];
+				String val = NULL;
+				debug(DEBUG_EXPECTED,"Setpoint Status requested"); 
+				xPL_setSchema(xplrcsStatusMessage, "hvac", "setpoint");
+				xPL_clearMessageNamedValues(xplrcsStatusMessage);
+				xPL_setMessageNamedValue(xplrcsStatusMessage, "zone", queryZone);
+				if(lastCmdType == CMDTYPE_RQ_SETPOINT_HEAT){
+					val = getVal(wc, sizeof(wc), curArgList, "SPH");
+					if(val)
+						xPL_setMessageNamedValue(xplrcsStatusMessage, setPointList[0], val );
 				}
-
-				*pd = 0;
-				pd++;
-				if(strcmp(arg, "a")){  /* Do not send address arg */
-					debug(DEBUG_STATUS, "Adding: key = %s, value = %s", arg, pd);
-					/* Set key and value */
+				else{
+					val = getVal(wc, sizeof(wc), curArgList, "SPC");
+					if(val)
+						xPL_setMessageNamedValue(xplrcsStatusMessage, setPointList[1], val );
 				}
+				if(val && !xPL_sendMessage(xplrcsStatusMessage))
+					debug(DEBUG_UNEXPECTED, "Setpoint status transmission failed");
+			}
+			/* If it was a zone info request */
+			else if(lastCmdType == CMDTYPE_RQ_ZONE){
+				char wc[20];
+				String val = NULL;
+				debug(DEBUG_EXPECTED,"Zone Status requested"); 
+				xPL_setSchema(xplrcsStatusMessage, "hvac", "zone");
+				xPL_clearMessageNamedValues(xplrcsStatusMessage);
+				for(i = 0 ; curArgList[i]; i++){ /* Iterate through arg list */
+					debug(DEBUG_ACTION, "Arg: %s", curArgList[i]);
+					if(!strncmp(curArgList[i], "O=", 2))
+						xPL_setMessageNamedValue(xplrcsStatusMessage, "zone", DEF_ZONE); /* FIXME */
+					else if(!strncmp(curArgList[i], "FM=", 3)){
+						val = getVal(wc, sizeof(wc), curArgList, "FM");
+						if(val){
+							if(!strcmp(val, "0"))
+								val = fanModeList[0];
+							else
+								val = fanModeList[1];
+							xPL_setMessageNamedValue(xplrcsStatusMessage,"fan-mode", val);
+						}
+					}
+					else if(!strncmp(curArgList[i], "M=", 2)){
+						val = getVal(wc, sizeof(wc), curArgList, "M");
+						if(val){
+							if(!strcmp(val, "O"))
+								val = modeList[0];
+							else if(!strcmp(val, "H"))
+								val = modeList[1];
+							else if(!strcmp(val, "C"))
+								val = modeList[2];
+							else if(!strcmp(val, "A"))
+								val = modeList[3];
+							else
+								val = "?";
+							xPL_setMessageNamedValue(xplrcsStatusMessage,"hvac-mode", val);
+						}
+					}
+					else if(!strncmp(curArgList[i], "T=", 2)){
+						val = getVal(wc, sizeof(wc), curArgList, "T");
+						if(val){
+							xPL_setMessageNamedValue(xplrcsStatusMessage,"temperature", val);
+						}
 
+					}
+
+				}
+				if(!xPL_sendMessage(xplrcsStatusMessage))
+					debug(DEBUG_UNEXPECTED, "Zone info transmission failed");
 			}
 			free(wscur); /* Free working string */
 		}
