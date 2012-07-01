@@ -465,18 +465,18 @@ static String doDisplay(String ws, xPL_MessagePtr theMessage, const String const
 	/* Outside Temperature */
 	val = xPL_getMessageNamedValue(theMessage, displayList[0]);
 	if(val){
-		res = val;
+		res = ws;
 		sprintf(ws+strlen(ws), " OT=%s", val);
 	}
 
 	/* Display lock */
 	val = xPL_getMessageNamedValue(theMessage, displayList[1]);
 	if(val){
-		if(!strcmp(val, "on"))
+		if((!strcmp(val, "on"))||(!strcmp(val, "yes"))||(!strcmp(val, "1")))
 			state = "1";
 		else
 			state = "0";
-		res = val;
+		res = ws;
 		sprintf(ws+strlen(ws), " DL=%s", state);
 	}
 
