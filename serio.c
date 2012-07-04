@@ -45,6 +45,97 @@
 #define FALSE 0
 #define ERROR -1
 
+#define SERIO_MAGIC	0x4C9A8DBF
+
+enum {MS_OK, MS_FAULT};
+
+/*
+* Private function to free all memory used in a seriostuff_t type
+*/
+
+static void free_seriostuff(seriostuff_t *serio)
+{
+	if(serio && (serio->magic == SERIO_MAGIC)){
+		if(serio->line)
+			free(serio->line);
+
+		if(serio->path)
+			free(serio->path);
+		serio->magic = 0;
+		free(serio);
+	}
+}
+
+
+/*
+* Private function to do open on a node and set it up for serial I/O
+*/
+
+
+static int node_open(seriostuff_t *serio)
+{
+	struct termios termios;
+
+	/* 
+	 * Open the serio tty device.
+	 */
+
+	serio->fd=open(serio->path, O_RDWR | O_NOCTTY | O_NDELAY);
+
+	if(serio->fd == -1) {
+		return FALSE;
+	}
+	
+	/* Set the options on the port. */
+	
+	/* We don't want to block reads. */
+	if(fcntl(serio->fd, F_SETFL, O_NONBLOCK) == -1) {
+		close(serio->fd);
+		return FALSE;
+	}
+	
+	/* Get the current tty settings. */
+	if(tcgetattr(serio->fd, &termios) != 0) {
+		close(serio->fd);
+		return FALSE;
+	}
+	
+	/* Enable receiver. */
+	termios.c_cflag |= CLOCAL | CREAD;
+	
+	/* Set to 8N1. */
+	termios.c_cflag &= ~PARENB;
+	termios.c_cflag &= ~CSTOPB;
+	termios.c_cflag &= ~CSIZE;
+	termios.c_cflag |=  CS8;
+	
+	/* Accept raw data. */
+	termios.c_lflag &= ~(ICANON | ECHO | ISIG);
+	termios.c_oflag &= ~(OPOST | ONLCR | OCRNL | ONLRET | OFILL);
+	termios.c_iflag &= ~(ICRNL | IXON | IXOFF | IMAXBEL);
+
+	/* Set the speed of the port. */
+	if(cfsetospeed(&termios, (speed_t) serio->brc) != 0) {
+		close(serio->fd);
+		return FALSE;
+	}
+	if(cfsetispeed(&termios, (speed_t) serio->brc) != 0) {
+		close(serio->fd);
+		return FALSE;
+	}
+	
+	/* Save our modified settings back to the tty. */
+	if(tcsetattr(serio->fd, TCSANOW, &termios) != 0) {
+		close(serio->fd);
+		return FALSE;
+	}
+
+	return TRUE;
+
+}
+
+
+
 /*
 * Check baud rate for validity
 */
@@ -74,6 +165,36 @@ int serio_get_baud( unsigned br)
 }
 
 
+/*
+* Check the path name to the node to ensure it exists and is a character device
+*/
+
+int serio_check_node(seriostuff_t *serio)
+{
+	struct stat s;
+
+	/* Do sanity checks first */
+
+	if(stat(serio->path, &s) < 0){
+		debug(DEBUG_UNEXPECTED, "Can't stat %s: %s", serio->path, strerror(errno));
+		return FALSE;
+	}
+
+	if(!S_ISCHR(s.st_mode)){
+		debug(DEBUG_UNEXPECTED, "%s is not a character device", serio->path);
+		return FALSE;
+	}
+
+	if(access(serio->path, R_OK|W_OK) < 0){
+		debug(DEBUG_UNEXPECTED, "Permissions problem on: %s", serio->path);
+		return FALSE;
+	}
+	return TRUE;
+
+}
+
+
+
 /* 
  * Open the serial device. 
  *
@@ -84,27 +205,9 @@ int serio_get_baud( unsigned br)
 
 
 seriostuff_t *serio_open(char *tty_name, unsigned baudrate) {
-	struct termios termios;
 	seriostuff_t *serio;
 	speed_t brc;
-	struct stat s;
 
-	/* Do sanity checks first */
-
-	if(stat(tty_name, &s) < 0){
-		debug(DEBUG_UNEXPECTED, "Can't stat %s: %s", strerror(errno));
-		return NULL;
-	}
-
-	if(!S_ISCHR(s.st_mode)){
-		debug(DEBUG_UNEXPECTED, "%s is not a character device", tty_name);
-		return NULL;
-	}
-
-	if(access(tty_name, R_OK|W_OK) < 0){
-		debug(DEBUG_UNEXPECTED, "Permissions problem on: %s", tty_name);
-		return NULL;
-	}
 
 	if(!(brc = serio_get_baud(baudrate))){
 		debug(DEBUG_UNEXPECTED, "Invalid baud rate: %u\n", baudrate);
@@ -117,58 +220,39 @@ seriostuff_t *serio_open(char *tty_name, unsigned baudrate) {
 
 	/* Zero it */
 	memset(serio, 0, sizeof(seriostuff_t));
+	
+	/* Add the magic number */
+
+	serio->magic = SERIO_MAGIC;
 
 	/* Allocate memory for line */
-	if(!(serio->line = malloc(SERIO_MAX_LINE)))
-		return NULL;
-		
-	/* 
-	 * Open the serio tty device.
-	 */
-	serio->fd=open(tty_name, O_RDWR | O_NOCTTY | O_NDELAY);
-	if(serio->fd == -1) {
+	if(!(serio->line = malloc(SERIO_MAX_LINE))){
+		free_seriostuff(serio);
 		return NULL;
 	}
-	
-	
-	/* Set the options on the port. */
-	
-	/* We don't want to block reads. */
-	if(fcntl(serio->fd, F_SETFL, O_NONBLOCK) == -1) {
+	/* Duplicate path name */
+	if(!(serio->path = strdup(tty_name))){
+		free_seriostuff(serio);
 		return NULL;
 	}
-	
-	/* Get the current tty settings. */
-	if(tcgetattr(serio->fd, &termios) != 0) {
-		return NULL;
-	}
-	
-	/* Enable receiver. */
-	termios.c_cflag |= CLOCAL | CREAD;
-	
-	/* Set to 8N1. */
-	termios.c_cflag &= ~PARENB;
-	termios.c_cflag &= ~CSTOPB;
-	termios.c_cflag &= ~CSIZE;
-	termios.c_cflag |=  CS8;
-	
-	/* Accept raw data. */
-	termios.c_lflag &= ~(ICANON | ECHO | ISIG);
-	termios.c_oflag &= ~(OPOST | ONLCR | OCRNL | ONLRET | OFILL);
-	termios.c_iflag &= ~(ICRNL | IXON | IXOFF | IMAXBEL);
 
-	/* Set the speed of the port. */
-	if(cfsetospeed(&termios, brc) != 0) {
-		return NULL;
-	}
-	if(cfsetispeed(&termios, brc) != 0) {
+
+	serio->brc = (unsigned ) brc;
+
+	/* Make sure the path is valid */
+
+	if(!serio_check_node(serio)){
+		free_seriostuff(serio);
 		return NULL;
 	}
 	
-	/* Save our modified settings back to the tty. */
-	if(tcsetattr(serio->fd, TCSANOW, &termios) != 0) {
+	/* Open the port */
+
+	if(!node_open(serio)){
+		free_seriostuff(serio);
 		return NULL;
 	}
+	
 	
 	return(serio);
 }
@@ -180,15 +264,14 @@ seriostuff_t *serio_open(char *tty_name, unsigned baudrate) {
 
 int serio_fd(seriostuff_t *serio)
 {
-	if(serio)
-		return serio->fd;
-	return -1;
+	return serio->fd;
 }
 
 /* Flush the input buffer */
 
 int serio_flush_input(seriostuff_t *serio)
 {
+
 	return tcflush(serio->fd, TCIFLUSH);
 }
 
@@ -197,10 +280,11 @@ int serio_flush_input(seriostuff_t *serio)
 /* Close the TTY port, and free the serio structure */
 
 void serio_close(seriostuff_t *serio){
-	close(serio->fd);
-	if(serio->line)
-		free(serio->line);
-	free(serio);
+
+	if(serio->fd >= 0)
+		close(serio->fd);
+	free_seriostuff(serio);
+
 }
 
 /*
@@ -209,6 +293,7 @@ void serio_close(seriostuff_t *serio){
 
 int serio_write(seriostuff_t *serio, const void *buffer, size_t count)
 {
+
 	return write(serio->fd, buffer, count);
 }
 
@@ -218,6 +303,7 @@ int serio_write(seriostuff_t *serio, const void *buffer, size_t count)
 
 int serio_read(seriostuff_t *serio, void *buffer, size_t count)
 {
+
 	return read(serio->fd, buffer, count);
 }
 
@@ -225,7 +311,7 @@ int serio_read(seriostuff_t *serio, void *buffer, size_t count)
 /*
 * Non blocking line read
 * Read bytes one at a time and build a line.
-* Return 1 on end of line detected, 0 if not at end of line, and -1 if error.
+* Return 1 return detected, 0 if not at end of line, and -1 if error.
 */
 
 
@@ -248,9 +334,12 @@ int serio_nb_line_read(seriostuff_t *serio)
 			return FALSE;
 		}
 		else if(res == 1){
+			/* debug(DEBUG_ACTION,"Byte received"); */
 			if(c != '\r'){
 				if(serio->pos < (SERIO_MAX_LINE - 1))
 					serio->line[serio->pos++] = c;
+				else
+					debug(DEBUG_UNEXPECTED,"End of line buffer reached!");
 			}
 			else{
 				debug(DEBUG_ACTION, "Line received");
@@ -263,6 +352,53 @@ int serio_nb_line_read(seriostuff_t *serio)
 
 	return ERROR;
 }
+
+/*
+* Non blocking line read
+* Read bytes one at a time and build a line.
+* Return 1 on cr detected, 0 if not at end of line, and -1 if error.
+*/
+
+
+int serio_nb_line_readcr(seriostuff_t *serio)
+{
+	char c;
+	int res;
+
+	do{
+		res = serio_read(serio, &c, 1);	
+
+		if(res < 0){
+			if((errno != EAGAIN) && (errno != EWOULDBLOCK)){
+				debug(DEBUG_UNEXPECTED, "Read error on fd %d: %s", serio->fd, strerror(errno));
+				serio->pos = 0;
+				return ERROR;
+			}
+			return FALSE;
+		}
+		else if(res == 1){
+			/* debug(DEBUG_ACTION,"Byte received"); */
+			if(c == '\r') /* Ignore return */
+				continue;
+			if(c != '\n'){
+				if(serio->pos < (SERIO_MAX_LINE - 1))
+					serio->line[serio->pos++] = c;
+				else
+					debug(DEBUG_UNEXPECTED,"End of line buffer reached!");
+
+			}
+			else{
+				debug(DEBUG_ACTION, "Line received");
+				serio->line[serio->pos] = 0;
+				serio->pos = 0;
+				return TRUE;
+			}
+		}
+	} while(TRUE);
+
+	return ERROR;
+}
+
 
 /*
 * Return address of line buffer used for serio_nb_line_read
@@ -281,21 +417,15 @@ char *serio_line(seriostuff_t *serio)
 int serio_printf(seriostuff_t *serio, const char *format, ...)
 {
  	va_list ap;
-	int res;
+	int res = 0;
     
 	va_start(ap, format);
 
-	res = vdprintf(serio->fd, format, ap);
+	if(serio->fd >= 0)
+		res = vdprintf(serio->fd, format, ap);
 
 	va_end(ap);
 
 	return res;
 }
-
-
-
-
-
-
-
 

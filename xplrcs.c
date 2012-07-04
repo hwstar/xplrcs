@@ -35,11 +35,13 @@
 #include "serio.h"
 #include "notify.h"
 
-#define SHORT_OPTIONS "a:d:hi:l:np:s:v"
+
+#define SHORT_OPTIONS "a:d:f:hi:l:np:s:v"
 
 #define WS_SIZE 256
 
 #define DEF_COM_PORT		"/dev/ttyS0"
+#define DEF_PID_FILE		"/var/run/xplrcs.pid"
 #define DEF_ZONE		"thermostat"
 #define DEF_INSTANCE_ID		"hvac"
 
@@ -91,6 +93,7 @@ static char interface[WS_SIZE] = "";
 static char logPath[WS_SIZE] = "";
 static char lastLine[WS_SIZE]; 
 static char instanceID[WS_SIZE] = DEF_INSTANCE_ID;
+static char pidFile[WS_SIZE] = DEF_PID_FILE;
 
 /* Commandline options. */
 
@@ -103,6 +106,7 @@ static struct option longOptions[] = {
   {"interface", 1, 0, 'i'},
   {"log", 1, 0, 'l'},
   {"no-background", 0, 0, 'n'},
+  {"pid-file", 0, 0, 'f'},
   {"version", 0, 0, 'v'},
   {0, 0, 0, 0}
 };
@@ -190,6 +194,71 @@ static const String const displayList[] = {
 	NULL
 };
 
+
+/* 
+ * Get the pid from a pidfile.  Returns the pid or -1 if it couldn't get the
+ * pid (either not there, stale, or not accesible).
+ */
+static pid_t pid_read(char *filename) {
+	FILE *file;
+	pid_t pid;
+	
+	/* Get the pid from the file. */
+	file=fopen(filename, "r");
+	if(!file) {
+		return(-1);
+	}
+	if(fscanf(file, "%d", &pid) != 1) {
+		fclose(file);
+		return(-1);
+	}
+	if(fclose(file) != 0) {
+		return(-1);
+	}
+	
+	/* Check that a process is running on this pid. */
+	if(kill(pid, 0) != 0) {
+		
+		/* It might just be bad permissions, check to be sure. */
+		if(errno == ESRCH) {
+			return(-1);
+		}
+	}
+	
+	/* Return this pid. */
+	return(pid);
+}
+
+
+/* 
+ * Write the pid into a pid file.  Returns zero if it worked, non-zero
+ * otherwise.
+ */
+static int pid_write(char *filename, pid_t pid) {
+	FILE *file;
+	
+	/* Create the file. */
+	file=fopen(filename, "w");
+	if(!file) {
+		return -1;
+	}
+	
+	/* Write the pid into the file. */
+	(void) fprintf(file, "%d\n", pid);
+	if(ferror(file) != 0) {
+		(void) fclose(file);
+		return -1;
+	}
+	
+	/* Close the file. */
+	if(fclose(file) != 0) {
+		return -1;
+	}
+	
+	/* We finished ok. */
+	return 0;
+}
+
 /*
 * Change string to upper case
 * Warning: String must be nul terminated.
@@ -215,6 +284,8 @@ static void shutdownHandler(int onSignal)
 	xPL_setServiceEnabled(xplrcsService, FALSE);
 	xPL_releaseService(xplrcsService);
 	xPL_shutdown();
+	/* Unlink the pid file if we can. */
+	(void) unlink(pidFile);
 	exit(0);
 }
 
@@ -1022,6 +1093,7 @@ void showHelp(void)
 	printf("                          (Valid addresses are 0 - 255, %d is the default)\n", xplrcsAddress); 
 	printf("  -d, --debug LEVEL       Set the debug level, 0 is off, the\n");
 	printf("                          compiled-in default is %d and the max\n", debugLvl);
+	printf("  -f, --pid-file PATH     Set new pid file path, default is: %s\n", pidFile);
 	printf("                          level allowed is %d\n", DEBUG_MAX);
 	printf("  -h, --help              Shows this\n");
 	printf("  -i, --interface NAME    Set the broadcast interface (e.g. eth0)\n");
@@ -1084,6 +1156,13 @@ int main(int argc, char *argv[])
 				}
 
 				break;
+
+			/* Was it a pid file switch? */
+			case 'f':
+				strncpy(pidFile, optarg, WS_SIZE - 1);
+				logPath[WS_SIZE - 1] = 0;
+				debug(DEBUG_ACTION,"New pid file path is: %s",
+				pidFile);
 			
 			/* Was it a help request? */
 			case 'h':
@@ -1154,7 +1233,11 @@ int main(int argc, char *argv[])
 	if(debugLvl >= 5)
 		xPL_setDebugging(TRUE);
 
-  
+  	/* Make sure we are not already running (.pid file check). */
+	if(pid_read(pidFile) != -1) {
+		fatal("%s is already running", progName);
+	}
+
 	/* Fork into the background. */
 
 	if(!noBackground) {
@@ -1269,8 +1352,8 @@ int main(int argc, char *argv[])
 	usleep(100000);
 	serio_flush_input(serioStuff);
 
-	/* Ask xPL to monitor our serial device */
-	if(xPL_addIODevice(serioHandler, 1234, serio_fd(serioStuff), TRUE, FALSE, FALSE) == FALSE)
+	/* Ask xPL to monitor our serial fd */
+	if(!xPL_addIODevice(serioHandler, 1234, serio_fd(serioStuff), TRUE, FALSE, FALSE))
 		fatal("Could not register serial I/O fd with xPL");
 
 	/* Add 1 second tick service */
@@ -1282,6 +1365,11 @@ int main(int argc, char *argv[])
 
  	/* Enable the service */
   	xPL_setServiceEnabled(xplrcsService, TRUE);
+
+	if(pid_write(pidFile, getpid()) != 0) {
+		debug(DEBUG_UNEXPECTED, "Could not write pid file '%s'.", pidFile);
+	}
+
 
 
 
