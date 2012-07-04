@@ -1093,8 +1093,8 @@ void showHelp(void)
 	printf("                          (Valid addresses are 0 - 255, %d is the default)\n", xplrcsAddress); 
 	printf("  -d, --debug LEVEL       Set the debug level, 0 is off, the\n");
 	printf("                          compiled-in default is %d and the max\n", debugLvl);
-	printf("  -f, --pid-file PATH     Set new pid file path, default is: %s\n", pidFile);
 	printf("                          level allowed is %d\n", DEBUG_MAX);
+	printf("  -f, --pid-file PATH     Set new pid file path, default is: %s\n", pidFile);
 	printf("  -h, --help              Shows this\n");
 	printf("  -i, --interface NAME    Set the broadcast interface (e.g. eth0)\n");
 	printf("  -l, --log  PATH         Path name to debug log file when daemonized\n");
