@@ -1161,8 +1161,8 @@ int main(int argc, char *argv[])
 			case 'f':
 				strncpy(pidFile, optarg, WS_SIZE - 1);
 				logPath[WS_SIZE - 1] = 0;
-				debug(DEBUG_ACTION,"New pid file path is: %s",
-				pidFile);
+				debug(DEBUG_ACTION,"New pid file path is: %s", pidFile);
+				break;
 			
 			/* Was it a help request? */
 			case 'h':
