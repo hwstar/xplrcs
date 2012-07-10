@@ -5,5 +5,5 @@ It can be run as a daemon, or in the foreground. There are command line options
 to select the com port, thermostat address, log file, debug level, and
 broadcast interface.For a complete list of command line options, type ./rc65 --help once the program is built.
 
-The program is dependent on having xPLLib installed on your system.
+To compile xplrcs, compile and install xPLLib on your system first.
 
