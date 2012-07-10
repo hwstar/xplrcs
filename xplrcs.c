@@ -20,7 +20,15 @@
 *
 *
 */
+/* Define these if not defined */
 
+#ifndef VERSION
+	#define VERSION "X.X.X"
+#endif
+
+#ifndef EMAIL
+	#define EMAIL "hwstar@rodgers.sdcoxmail.com"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,6 +43,7 @@
 #include "serio.h"
 #include "notify.h"
 
+#define MALLOC_ERROR	malloc_error(__FILE__,__LINE__)
 
 #define SHORT_OPTIONS "a:d:f:hi:l:np:s:v"
 
@@ -49,7 +58,8 @@
 * Command types
 */
 
-typedef enum {CMDTYPE_NONE=0, CMDTYPE_BASIC, CMDTYPE_RQ_SETPOINT_HEAT, CMDTYPE_RQ_SETPOINT_COOL, CMDTYPE_RQ_ZONE, CMDTYPE_DATETIME} CmdType_t;
+typedef enum {CMDTYPE_NONE=0, CMDTYPE_BASIC, CMDTYPE_RQ_SETPOINT_HEAT, CMDTYPE_RQ_SETPOINT_COOL, 
+CMDTYPE_RQ_ZONE, CMDTYPE_DATETIME} CmdType_t;
 
 
 /*
@@ -193,6 +203,29 @@ static const String const displayList[] = {
 	"lock",
 	NULL
 };
+
+
+
+/* 
+ * Allocate a memory block and zero it out
+ */
+
+static void *mallocz(size_t size)
+{
+	void *m = malloc(size);
+	if(m)
+		memset(m, 0, size);
+	return m;
+}
+ 
+/*
+ * Malloc error handler
+ */
+ 
+static void malloc_error(String file, int line)
+{
+	fatal("Out of memory in file %s, at line %d");
+}
 
 
 /* 
@@ -345,17 +378,16 @@ static String getVal(String ws, int wslimit, String *argList, String key)
 
 static void queueCommand( String cmd, CmdType_t type )
 {
-	CmdEntry_t *newCE = malloc(sizeof(CmdEntry_t));
+	CmdEntry_t *newCE = mallocz(sizeof(CmdEntry_t));
 	/* Did malloc succeed ? */
 	if(!newCE)
-		fatal("malloc() failed in queueCommand");
-	else
-		memset(newCE, 0, sizeof(CmdEntry_t)); /* Zero it out */
+		MALLOC_ERROR;
+	
 	/* Dup the command string */
 	newCE->cmd = strdup(cmd);
 
 	if(!newCE->cmd) /* Did strdup succeed? */
-		fatal("strdup() failed in queueCommand");
+		MALLOC_ERROR;
 
 	/* Save the type */
 	newCE->type = type;
@@ -415,6 +447,9 @@ static void freeCommand( CmdEntry_t *e)
 static int matchCommand(const String const *commandList, const String const command)
 {
 	int i;
+	
+	if((!command) || (!commandList))
+		return -1;
 
 	for(i = 0; commandList[i]; i++){
 		if(!strcmp(command, commandList[i]))
@@ -461,7 +496,7 @@ static String doHVACMode(String ws, xPL_MessagePtr theMessage, const String cons
 
 	if(mode){
 		i = matchCommand(modeList, mode);
-		if(modeList[i]){
+		if((i >= 0) && (modeList[i])){
 			strcat(ws, " ");
 			res = strcat(ws, modeCommands[i]);
 		}
@@ -484,7 +519,7 @@ static String doFanMode(String ws, xPL_MessagePtr theMessage, const String const
 
 	if(mode){
 		i = matchCommand(fanModeList, mode);
-		if(fanModeList[i]){
+		if((i >= 0) && (fanModeList[i])){
 			strcat(ws, " ");
 			res = strcat(ws, fanModeCommands[i]);
 		}
@@ -712,15 +747,16 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 
 	if(!xPL_isBroadcastMessage(theMessage)){ /* If not a broadcast message */
 		if(xPL_MESSAGE_COMMAND == xPL_getMessageType(theMessage)){ /* If the message is a command */
-			const String const type = xPL_getSchemaType(theMessage);
-			const String const class = xPL_getSchemaClass(theMessage);
-			const String const command =  xPL_getMessageNamedValue(theMessage, "command");
-			const String const zone =  xPL_getMessageNamedValue(theMessage, "zone");
+			const String type = xPL_getSchemaType(theMessage);
+			const String class = xPL_getSchemaClass(theMessage);
+			const String command =  xPL_getMessageNamedValue(theMessage, "command");
+			const String request =  xPL_getMessageNamedValue(theMessage, "request");
+			const String  zone =  xPL_getMessageNamedValue(theMessage, "zone");
 			
 			/* Allocate a working string */
 
-			if(!(ws = malloc(WS_SIZE)))
-				fatal("Cannot allocate work string in xPLListener");
+			if(!(ws = mallocz(WS_SIZE)))
+				MALLOC_ERROR;
 			ws[0] = 0;
 			if(zone){
 				// FIXME Zone logic missing
@@ -761,8 +797,8 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 					}
 				}
 				else if(!strcmp(type, "request")){ /* Request command schema */
-					if(command){
-						switch(matchCommand(requestCommandList, command)){
+					if(request){
+						switch(matchCommand(requestCommandList, request)){
 
 							case 0: /* gateinfo */
 								doGateInfo();
@@ -789,13 +825,6 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 						}
 								
 					}
-
-						
-
-					
-				
-
-
 				}
 			}
 			free(ws);
@@ -855,7 +884,7 @@ static void serioHandler(int fd, int revents, int userValue)
 				wscur = strdup(line);
 				wslast = strdup(lastLine);
 				if(!wscur || !wslast){
-					fatal("Out of memory in serioHandler(): point 1");
+					MALLOC_ERROR;
 				}
 
 				/* Parse the current and last lists for comparison */
@@ -953,7 +982,7 @@ static void serioHandler(int fd, int revents, int userValue)
 			queryZone = DEF_ZONE;
 
 			if(!(wscur = strdup(line)))
-				fatal("Out of memory in serioHandler(): point 2");
+				MALLOC_ERROR;
 
 			debug(DEBUG_EXPECTED, "Non-poll response: %s", wscur);
 			curArgc = parseRC65Status(wscur, curArgList, 19);
