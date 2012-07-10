@@ -18,13 +18,13 @@ DAEMONDIR = /usr/local/bin
 
 # Object file lists
 
-OBJS = $(PACKAGE).o serio.o notify.o
+OBJS = $(PACKAGE).o serio.o notify.o confread.o
 
 #Dependencies
 
 all: $(PACKAGE) 
 
-$(PACKAGE).o: Makefile $(PACKAGE).c notify.h serio.h
+$(PACKAGE).o: Makefile $(PACKAGE).c notify.h serio.h confread.h types.h
 
 #Rules
 

@@ -40,8 +40,10 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <xPL.h>
+#include "types.h"
 #include "serio.h"
 #include "notify.h"
+#include "confread.h"
 
 #define MALLOC_ERROR	malloc_error(__FILE__,__LINE__)
 
@@ -51,7 +53,8 @@
 
 #define DEF_COM_PORT		"/dev/ttyS0"
 #define DEF_PID_FILE		"/var/run/xplrcs.pid"
-#define DEF_ZONE		"thermostat"
+#define DEF_CONFIG_FILE		"/etc/xplrcs.conf"
+#define DEF_ZONE			"thermostat"
 #define DEF_INSTANCE_ID		"hvac"
 
 /* 
@@ -75,20 +78,30 @@ struct cmd_entry {
 	CmdEntry_t *next;
 };
 
-	
+/*
+ * Command line override bits
+ */
+ 
+typedef struct cloverrides {
+	unsigned pid_file : 1;
+	unsigned com_port : 1;
+	unsigned instance_id : 1;
+	unsigned log_path : 1;
+	unsigned interface : 1;
+} clOverride_t;
 
 
 char *progName;
 int debugLvl = 0; 
-Bool noBackground = FALSE;
-int xplrcsAddress = 1;
-int pollRate = 5;
-Bool pollPending = FALSE;
-CmdType_t lastCmdType = CMDTYPE_NONE;
-CmdEntry_t *cmdEntryHead = NULL;
-CmdEntry_t *cmdEntryTail = NULL;
 
-
+static Bool noBackground = FALSE;
+static int xplrcsAddress = 1;
+static int pollRate = 5;
+static Bool pollPending = FALSE;
+static clOverride_t clOverride = {0,0,0,0,0};
+static CmdType_t lastCmdType = CMDTYPE_NONE;
+static CmdEntry_t *cmdEntryHead = NULL;
+static CmdEntry_t *cmdEntryTail = NULL;
 
 static seriostuff_t *serioStuff = NULL;
 static xPL_ServicePtr xplrcsService = NULL;
@@ -97,7 +110,9 @@ static xPL_MessagePtr xplrcsTriggerMessage = NULL;
 static xPL_MessagePtr xplrcsZoneTriggerMessage = NULL;
 static xPL_MessagePtr xplrcsHeatSetPointTriggerMessage = NULL;
 static xPL_MessagePtr xplrcsCoolSetPointTriggerMessage = NULL;
+static ConfigEntryPtr_t	configEntry = NULL;
 
+static char configFile[WS_SIZE] = DEF_CONFIG_FILE;
 static char comPort[WS_SIZE] = DEF_COM_PORT;
 static char interface[WS_SIZE] = "";
 static char logPath[WS_SIZE] = "";
@@ -300,6 +315,9 @@ static int pid_write(char *filename, pid_t pid) {
 static String str2Upper(char *q)
 {
 	char *p;
+	
+	if(!q)
+		return NULL;
 			
 	if(q){
 		for (p = q; *p; ++p) *p = toupper(*p);
@@ -761,7 +779,7 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 			if(zone){
 				// FIXME Zone logic missing
 				debug(DEBUG_EXPECTED,"Zone present");
-				strcpy(ws, "A=1");
+				confreadStringCopy(ws, "A=1", 5);
 			}
 
 
@@ -864,7 +882,6 @@ static void serioHandler(int fd, int revents, int userValue)
 			/* Has to be a response to a poll */
 			/* Compare with last line received */
 			if(!firstTime && strcmp(line, lastLine)){
-				/* Clear any old name/values */
 				debug(DEBUG_STATUS, "Got updated poll status: %s", line);
 				queryZone = DEF_ZONE;
 
@@ -880,7 +897,7 @@ static void serioHandler(int fd, int revents, int userValue)
 
 
 
-				/* Make working strings from the current and list lines */
+				/* Make working strings from the current and last lines */
 				wscur = strdup(line);
 				wslast = strdup(lastLine);
 				if(!wscur || !wslast){
@@ -973,8 +990,8 @@ static void serioHandler(int fd, int revents, int userValue)
 				
 			}
 			/* Copy current string into last string for future comparisons */	
-			strncpy(lastLine, line, WS_SIZE);
-			lastLine[WS_SIZE - 1] = 0;
+			confreadStringCopy(lastLine, line, WS_SIZE);
+			
 			firstTime = FALSE;
 		} /* End if(pollPending) */
 		else{
@@ -1147,6 +1164,7 @@ int main(int argc, char *argv[])
 {
 	int longindex;
 	int optchar;
+	String p;
 
 	/* Set the program name */
 	progName=argv[0];
@@ -1167,12 +1185,9 @@ int main(int argc, char *argv[])
 			case '?':
 				exit(1);
 		
-			/* Was it a thermostat address? */
+			/* Was it a thermostat address? (deprecated) */
 			case 'a':
 				xplrcsAddress = atoi(optarg);
-				if(xplrcsAddress < 0 || xplrcsAddress > 255) {
-					fatal("Invalid thermostat address");
-				}
 				break;
 
 			/* Was it a debug level set? */
@@ -1188,8 +1203,8 @@ int main(int argc, char *argv[])
 
 			/* Was it a pid file switch? */
 			case 'f':
-				strncpy(pidFile, optarg, WS_SIZE - 1);
-				logPath[WS_SIZE - 1] = 0;
+				confreadStringCopy(pidFile, optarg, WS_SIZE - 1);
+				clOverride.pid_file = 1;
 				debug(DEBUG_ACTION,"New pid file path is: %s", pidFile);
 				break;
 			
@@ -1200,15 +1215,14 @@ int main(int argc, char *argv[])
 
 			/* Specify interface to broadcast on */
 			case 'i': 
-				strncpy(interface, optarg, WS_SIZE -1);
-				interface[WS_SIZE - 1] = 0;
-				xPL_setBroadcastInterface(interface);
+				confreadStringCopy(interface, optarg, WS_SIZE -1);
+				clOverride.interface = 1;
 				break;
 
 			case 'l':
 				/* Override log path*/
-				strncpy(logPath, optarg, WS_SIZE - 1);
-				logPath[WS_SIZE - 1] = 0;
+				confreadStringCopy(logPath, optarg, WS_SIZE - 1);
+				clOverride.log_path = 1;
 				debug(DEBUG_ACTION,"New log path is: %s",
 				logPath);
 
@@ -1223,8 +1237,8 @@ int main(int argc, char *argv[])
 				break;
 			case 'p':
 				/* Override com port*/
-				strncpy(comPort, optarg, WS_SIZE - 1);
-				comPort[WS_SIZE - 1] = 0;
+				confreadStringCopy(comPort, optarg, WS_SIZE - 1);
+				clOverride.com_port = 1;
 				debug(DEBUG_ACTION,"New com port is: %s",
 				comPort);
 
@@ -1232,8 +1246,8 @@ int main(int argc, char *argv[])
 
 			/* Was it an instance ID ? */
 			case 's':
-				strncpy(instanceID, optarg, WS_SIZE);
-				instanceID[WS_SIZE -1] = 0;
+				confreadStringCopy(instanceID, optarg, WS_SIZE);
+				clOverride.instance_id = 1;
 				debug(DEBUG_ACTION,"New instance ID is: %s", instanceID);
 				break;
 
@@ -1258,6 +1272,44 @@ int main(int argc, char *argv[])
 		fatal("Extra argument on commandline, '%s'", argv[optind]);
 	}
 
+	/* Attempt to read a config file */
+	
+	configEntry =confreadScan(configFile, NULL);
+
+	if(configEntry){
+		
+		/* Get config file entries in general section */
+		
+		debug(DEBUG_ACTION,"Config file present");
+		
+		/* com port */
+		if((!clOverride.com_port) && (p = confreadValueBySectKey(configEntry, "general", "com-port")))
+			confreadStringCopy(comPort, p, sizeof(comPort));
+			
+		/* Instance ID */
+		if((!clOverride.instance_id) && (p = confreadValueBySectKey(configEntry, "general", "instance-id")))
+			confreadStringCopy(instanceID, p, sizeof(instanceID));
+		
+		/* Interface */
+		if((!clOverride.interface) && (p = confreadValueBySectKey(configEntry, "general", "interface")))
+			confreadStringCopy(interface, p, sizeof(interface));
+			
+		/* pid file */
+		if((!clOverride.pid_file) && (p = confreadValueBySectKey(configEntry, "general", "pid-file")))
+			confreadStringCopy(pidFile, p, sizeof(pidFile));	
+						
+		/* log path */
+		if((!clOverride.log_path) && (p = confreadValueBySectKey(configEntry, "general", "log-path")))
+			confreadStringCopy(logPath, p, sizeof(logPath));
+			
+	}
+
+
+	/* Test for invalid thermostat address */
+	if(xplrcsAddress < 0 || xplrcsAddress > 255) {
+		fatal("Invalid thermostat address");
+	}
+
 	/* Turn on library debugging for level 5 */
 	if(debugLvl >= 5)
 		xPL_setDebugging(TRUE);
@@ -1273,13 +1325,18 @@ int main(int argc, char *argv[])
 		int retval;
 		debug(DEBUG_STATUS, "Forking into background");
 
-    		/* 
+    	/* 
 		* If debugging is enabled, and we are daemonized, redirect the debug output to a log file if
-    		* the path to the logfile is defined
+    	* the path to the logfile is defined
 		*/
 
 		if((debugLvl) && (logPath[0]))                          
 			notify_logpath(logPath);
+			
+
+		/* Check to see the serial device exists before we fork */
+		if(!serio_check_node(comPort))
+			fatal("Serial device %s does not exist or its permissions are not allowing it to be used.", comPort);
 
 		/* Fork and exit the parent */
 
@@ -1332,12 +1389,15 @@ int main(int argc, char *argv[])
 		close(2);
 		} 
 
+	/* Set the xPL interface */
+	xPL_setBroadcastInterface(interface);
+
 	/* Start xPL up */
 	if (!xPL_initialize(xPL_getParsedConnectionType())) {
 		fatal("Unable to start xPL lib");
 	}
 
-	/* Initialze xplrcs service */
+	/* Initialize xplrcs service */
 
 	/* Create a service and set our application version */
 	xplrcsService = xPL_createService("hwstar", "xplrcs", instanceID);
