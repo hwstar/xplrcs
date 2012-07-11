@@ -34,6 +34,13 @@
 #
 #interface =
 #
+#
+# The poll rate specifies the number of seconds between polls of thermostats attached to the serial port
+# polling is done in a round robin fashion. The duration of a complete polling cycle is the number of thermostats multiplied
+# by this value.
+#
+#poll-rate = 5
+#
 # The zone list is specified here. At least one zone list is mandatory. Multiple zones are separated with commas.
 #
 zones = thermostat

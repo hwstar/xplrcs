@@ -47,10 +47,12 @@
 
 #define MALLOC_ERROR	malloc_error(__FILE__,__LINE__)
 
-#define SHORT_OPTIONS "c:d:f:hi:l:np:s:v"
+#define SHORT_OPTIONS "c:d:f:hi:l:np:r:s:v"
 
 #define WS_SIZE 256
 #define MAX_ZONES 10
+#define	POLL_RATE_MIN 2
+#define	POLL_RATE_MAX 180
 
 #define DEF_COM_PORT		"/dev/ttyS0"
 #define DEF_PID_FILE		"/var/run/xplrcs.pid"
@@ -87,13 +89,15 @@ struct zone_entry {
 */
 
 typedef struct cmd_entry CmdEntry_t;
+typedef CmdEntry_t * CmdEntryPtr_t;
 
 struct cmd_entry {
 	String cmd;
 	CmdType_t type;
+	Bool sent;
 	ZoneEntryPtr_t ze;
-	CmdEntry_t *prev;
-	CmdEntry_t *next;
+	CmdEntryPtr_t prev;
+	CmdEntryPtr_t next;
 };
 
 /*
@@ -106,6 +110,7 @@ typedef struct cloverrides {
 	unsigned instance_id : 1;
 	unsigned log_path : 1;
 	unsigned interface : 1;
+	unsigned poll_rate : 1;
 } clOverride_t;
 
 
@@ -113,17 +118,16 @@ char *progName;
 int debugLvl = 0; 
 
 static Bool noBackground = FALSE;
-static int pollRate = 5;
+static unsigned pollRate = 5;
 static unsigned numZones = 0;
-static clOverride_t clOverride = {0,0,0,0,0};
-static CmdEntry_t *curCommand = NULL;
-static CmdEntry_t *cmdEntryHead = NULL;
-static CmdEntry_t *cmdEntryTail = NULL;
+static clOverride_t clOverride = {0,0,0,0,0,0};
+static CmdEntryPtr_t cmdEntryHead = NULL;
+static CmdEntryPtr_t cmdEntryTail = NULL;
 static ZoneEntryPtr_t zoneEntryHead = NULL;
 static ZoneEntryPtr_t zoneEntryTail = NULL;
 static ZoneEntryPtr_t pollPending = NULL;
 
-static seriostuff_t *serioStuff = NULL;
+static serioStuffPtr_t serioStuff = NULL;
 static xPL_ServicePtr xplrcsService = NULL;
 static xPL_MessagePtr xplrcsStatusMessage = NULL;
 static xPL_MessagePtr xplrcsTriggerMessage = NULL;
@@ -151,13 +155,14 @@ static struct option longOptions[] = {
 	{"log", 1, 0, 'l'},
 	{"no-background", 0, 0, 'n'},
 	{"pid-file", 0, 0, 'f'},
+	{"poll-rate", 1, 0, 'r'},
 	{"version", 0, 0, 'v'},
 	{0, 0, 0, 0}
 };
 
 /* Basic command list */
 
-static const String const basicCommandList[] = {
+static const String basicCommandList[] = {
 	"hvac-mode",
 	"fan-mode",
 	"setpoint",
@@ -168,7 +173,7 @@ static const String const basicCommandList[] = {
 
 /* Request command list */
 
-static const String const requestCommandList[] = {
+static const String requestCommandList[] = {
 	"gateinfo",
 	"zonelist",
 	"zoneinfo",
@@ -190,7 +195,7 @@ static const String const modeList[] = {
 
 /* Commands for modes */
 
-static const String const modeCommands[] = {
+static const String modeCommands[] = {
 	"M=O",
 	"M=H",
 	"M=C",
@@ -200,7 +205,7 @@ static const String const modeCommands[] = {
 
 /* Fan modes  */
 
-static const String const fanModeList[] = {
+static const String fanModeList[] = {
 	"auto",
 	"on",
 	NULL
@@ -208,7 +213,7 @@ static const String const fanModeList[] = {
 
 /* Commands for fan modes */
 
-static const String const fanModeCommands[] = {
+static const String fanModeCommands[] = {
 	"F=0",
 	"F=1",
 	NULL
@@ -216,7 +221,7 @@ static const String const fanModeCommands[] = {
 
 /* List of valid set points */
 
-static const String const setPointList[] = {
+static const String setPointList[] = {
 	"heating",
 	"cooling",
 	NULL
@@ -224,7 +229,7 @@ static const String const setPointList[] = {
 
 /* Commands for setpoints */
 
-static const String const setPointCommands[] = {
+static const String setPointCommands[] = {
 	"SPH",
 	"SPC",
 	NULL
@@ -232,7 +237,7 @@ static const String const setPointCommands[] = {
 
 /* List of valid display keywords */
 
-static const String const displayList[] = {
+static const String displayList[] = {
 	"outside-temp",
 	"lock",
 	NULL
@@ -473,7 +478,7 @@ static String getVal(String ws, int wslimit, String *argList, String key)
 
 static void queueCommand(ZoneEntryPtr_t ze, String cmd, CmdType_t type )
 {
-	CmdEntry_t *newCE = mallocz(sizeof(CmdEntry_t));
+	CmdEntryPtr_t newCE = mallocz(sizeof(CmdEntry_t));
 	
 	/* Did malloc succeed ? */
 	if(!newCE)
@@ -506,9 +511,9 @@ static void queueCommand(ZoneEntryPtr_t ze, String cmd, CmdType_t type )
 * Dequeue a command entry
 */
 
-static CmdEntry_t *dequeueCommand()
+static CmdEntryPtr_t dequeueCommand()
 {
-	CmdEntry_t *entry;
+	CmdEntryPtr_t entry;
 
 	if(!cmdEntryHead){
 		entry = NULL;
@@ -530,7 +535,7 @@ static CmdEntry_t *dequeueCommand()
 * Free a command entry
 */
 
-static void freeCommand( CmdEntry_t *e)
+static void freeCommand( CmdEntryPtr_t e)
 {
 	if(e){
 		if(e->cmd)
@@ -540,10 +545,23 @@ static void freeCommand( CmdEntry_t *e)
 }
 
 /*
+ * De-queue and free current command
+ */
+  
+static void dequeueAndFreeCommand()
+{
+		if(cmdEntryTail){
+			CmdEntryPtr_t ctf = dequeueCommand();
+			freeCommand(ctf);
+		}
+}
+
+
+/*
 * Match a command from a NULL-terminated list, return index to list entry
 */
 
-static int matchCommand(const String const *commandList, const String const command)
+static int matchCommand(const String *commandList, const String command)
 {
 	int i;
 	
@@ -562,7 +580,7 @@ static int matchCommand(const String const *commandList, const String const comm
 */
 
 
-static String makeCommaList(String ws, const String const *list)
+static String makeCommaList(String ws, const String *list)
 {
 	int i;
 
@@ -871,7 +889,7 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 			
 			/* If a zone was specified, see if it is in the zone list, and get the zone entry */
 			if(zone){
-				debug(DEBUG_EXPECTED,"Zone present");
+				debug(DEBUG_ACTION,"Zone present");
 				/* Find zone in list */
 				for(ze = zoneEntryHead; ze; ze = ze->next){
 					if(!strcmp(ze->name, zone))
@@ -879,10 +897,14 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 				}
 				if(ze){
 					/* Copy the address into the working string */
+					debug(DEBUG_ACTION,"Zone entry found");
 					snprintf(ws, WS_SIZE, "A=%u", ze->address);
 				}
 			}
-
+			if(command)
+				debug(DEBUG_ACTION, "Command = %s", command);
+			if(request)
+				debug(DEBUG_ACTION, "Request = %s", request);
 
 			if(!strcmp(class,"hvac")){
 				if(!strcmp(type, "basic")){ /* Basic command schema */
@@ -953,7 +975,6 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 }
 
 
-
 /*
 * Serial I/O handler (Callback from xPL)
 */
@@ -982,20 +1003,6 @@ static void serioHandler(int fd, int revents, int userValue)
 			/* Compare with last line received */
 			if(!pollPending->first_time && strcmp(line, pollPending->last_poll)){
 				debug(DEBUG_STATUS, "Got updated poll status: %s", line);
-				
-				
-
-				/* Prepare Zone trigger message */
-				xPL_clearMessageNamedValues(xplrcsZoneTriggerMessage);
-				xPL_setMessageNamedValue(xplrcsZoneTriggerMessage, "zone", pollPending->name);
-
-				/* Prepare Setpoint trigger messages */
-				xPL_clearMessageNamedValues(xplrcsHeatSetPointTriggerMessage);
-				xPL_setMessageNamedValue(xplrcsHeatSetPointTriggerMessage, "zone", pollPending->name);
-				xPL_clearMessageNamedValues(xplrcsCoolSetPointTriggerMessage);
-				xPL_setMessageNamedValue(xplrcsCoolSetPointTriggerMessage, "zone", pollPending->name);
-
-
 
 				/* Make working strings from the current and last lines */
 				if(!(wscur = strdup(line)))
@@ -1012,7 +1019,11 @@ static void serioHandler(int fd, int revents, int userValue)
 				if(lastArgc != curArgc){
 					sendAll = TRUE;
 				}
-
+				
+				/* Prep a zone trigger just in case something needs to be sent */
+				xPL_clearMessageNamedValues(xplrcsZoneTriggerMessage);
+				xPL_setMessageNamedValue(xplrcsZoneTriggerMessage, "zone", pollPending->name);
+				
 				/* Iterate through the list and figure out which args to send */
 				for(i = 0; i < curArgc; i++){
 					arg = curArgList[i];
@@ -1026,19 +1037,25 @@ static void serioHandler(int fd, int revents, int userValue)
 						}
 						*pd = 0;
 						pd++;
-						if(!strcmp(arg, "SPH")){
+						if(!strcmp(arg, "SPH")){ /* SPH has a dedicated trigger resource */
 							sendHeatSetPointTrigger = TRUE;
+							xPL_clearMessageNamedValues(xplrcsHeatSetPointTriggerMessage);
+							xPL_setMessageNamedValue(xplrcsHeatSetPointTriggerMessage, "zone", pollPending->name);
 							xPL_setMessageNamedValue(xplrcsHeatSetPointTriggerMessage, "setpoint", setPointList[0]);
 							xPL_setMessageNamedValue(xplrcsHeatSetPointTriggerMessage, "temperature", pd );
 						}
 
-						else if(!strcmp(arg, "SPC")){
+						else if(!strcmp(arg, "SPC")){ /* SPC has a dedicated trigger resource */
 							sendCoolSetPointTrigger = TRUE;
+							xPL_clearMessageNamedValues(xplrcsCoolSetPointTriggerMessage);
+							xPL_setMessageNamedValue(xplrcsCoolSetPointTriggerMessage, "zone", pollPending->name);
 							xPL_setMessageNamedValue(xplrcsCoolSetPointTriggerMessage, "setpoint", setPointList[1]);
 							xPL_setMessageNamedValue(xplrcsCoolSetPointTriggerMessage, "temperature", pd );
 						}
-						else if(!strcmp(arg, "FM")){
+						else if(!strcmp(arg, "FM")){ /* Zone triggers share a trigger resource */
 							sendZoneTrigger = TRUE;
+	
+
 							if(!strcmp(pd, "0"))
 								val = fanModeList[0];
 							else
@@ -1099,23 +1116,28 @@ static void serioHandler(int fd, int revents, int userValue)
 			pollPending = NULL;
 	
 		} /* End if(pollPending) */
-		else{
-			/* It's a response not related to a poll */
+		else{  /* It's a response not related to a poll (i.e. a response from a request) */
 
+	
 			if(!(wscur = strdup(line)))
 				MALLOC_ERROR;
 
 			debug(DEBUG_EXPECTED, "Non-poll response: %s", wscur);
+			
+			/* Parse the returned arguments */
 			curArgc = parseRC65Status(wscur, curArgList, 19);
 			/* If it was a set point request */
-			if((curCommand) && ((curCommand->type == CMDTYPE_RQ_SETPOINT_HEAT)||(curCommand->type == CMDTYPE_RQ_SETPOINT_COOL))){
+			if((cmdEntryTail) && ((cmdEntryTail->type == CMDTYPE_RQ_SETPOINT_HEAT)||(cmdEntryTail->type == CMDTYPE_RQ_SETPOINT_COOL))){
 				char wc[20];
+				/* Setpoint status (heat or cool) requested */
 				debug(DEBUG_EXPECTED,"Setpoint Status requested"); 
 				xPL_setSchema(xplrcsStatusMessage, "hvac", "setpoint");
 				xPL_clearMessageNamedValues(xplrcsStatusMessage);
-				if(curCommand->ze)
-					xPL_setMessageNamedValue(xplrcsStatusMessage, "zone", curCommand->ze->name);
-				if(curCommand->type == CMDTYPE_RQ_SETPOINT_HEAT){
+				xPL_setMessageNamedValue(xplrcsStatusMessage, "zone", 
+				(cmdEntryTail->ze && cmdEntryTail->ze->name) ? cmdEntryTail->ze->name : "unknown");
+
+				if(cmdEntryTail->type == CMDTYPE_RQ_SETPOINT_HEAT){
+					/* Setpoint heat requested */
 					val = getVal(wc, sizeof(wc), curArgList, "SPH");
 					if(val)
 						xPL_setMessageNamedValue(xplrcsStatusMessage, setPointList[0], val );
@@ -1129,15 +1151,16 @@ static void serioHandler(int fd, int revents, int userValue)
 					debug(DEBUG_UNEXPECTED, "Setpoint status transmission failed");
 			}
 			/* If it was a zone info request */
-			else if((curCommand) && (curCommand->type == CMDTYPE_RQ_ZONE)){
+			else if((cmdEntryTail) && (cmdEntryTail->type == CMDTYPE_RQ_ZONE)){
 				char wc[20];
 				debug(DEBUG_EXPECTED,"Zone Status requested"); 
 				xPL_setSchema(xplrcsStatusMessage, "hvac", "zone");
 				xPL_clearMessageNamedValues(xplrcsStatusMessage);
 				for(i = 0 ; curArgList[i]; i++){ /* Iterate through arg list */
 					debug(DEBUG_ACTION, "Arg: %s", curArgList[i]);
-					if((!strncmp(curArgList[i], "O=", 2))&& (curCommand->ze))
-						xPL_setMessageNamedValue(xplrcsStatusMessage, "zone", curCommand->ze->name);
+					if(!strncmp(curArgList[i], "O=", 2))
+						xPL_setMessageNamedValue(xplrcsStatusMessage, "zone",
+						(cmdEntryTail->ze && cmdEntryTail->ze->name) ? cmdEntryTail->ze->name : "unknown");
 					else if(!strncmp(curArgList[i], "FM=", 3)){
 						val = getVal(wc, sizeof(wc), curArgList, "FM");
 						if(val){
@@ -1177,9 +1200,9 @@ static void serioHandler(int fd, int revents, int userValue)
 					debug(DEBUG_UNEXPECTED, "Zone info transmission failed");
 			}
 			/* Free the command entry */
-			freeCommand(curCommand);
-			curCommand = NULL;
-			free(wscur); /* Free working string */
+			dequeueAndFreeCommand();
+			 /* Free working string */
+			free(wscur);
 		}
 	} /* End serio_nb_line_read */
 }
@@ -1192,7 +1215,6 @@ static void serioHandler(int fd, int revents, int userValue)
 
 static void tickHandler(int userVal, xPL_ObjectPtr obj)
 {
-	CmdEntry_t *cmdEntry;
 	static short pollCtr = 0;
 	static short readySent = FALSE;
 	static ZoneEntryPtr_t pollZone = NULL;
@@ -1219,15 +1241,15 @@ static void tickHandler(int userVal, xPL_ObjectPtr obj)
 			debug(DEBUG_UNEXPECTED, "Trigger event ready message transmission failed");
 
 	}
-	else if((cmdEntry = dequeueCommand())){ /* If command pending */
+	else if(cmdEntryTail && (!cmdEntryTail->sent)){ /* If command pending */
 		/* Uppercase the command string */
-		str2Upper(cmdEntry->cmd);
-		debug(DEBUG_EXPECTED, "Sending command: %s", cmdEntry->cmd);
-		serio_printf(serioStuff, "%s\r", cmdEntry->cmd);
-		if(curCommand->type != CMDTYPE_DATETIME)
-			curCommand = cmdEntry; /* Let the serial I/O handler know about the outstanding command */
-		else
-			curCommand = NULL; /* Datetime is zone independent, and will result in no response */
+		str2Upper(cmdEntryTail->cmd);
+		debug(DEBUG_EXPECTED, "Sending command: %s", cmdEntryTail->cmd);
+		serio_printf(serioStuff, "%s\r", cmdEntryTail->cmd);
+		cmdEntryTail->sent = TRUE;
+		if((cmdEntryTail->type == CMDTYPE_DATETIME)||(cmdEntryTail->type == CMDTYPE_BASIC)||
+		(cmdEntryTail->type == CMDTYPE_NONE))
+			dequeueAndFreeCommand(); /* These commands do not send back a response */
 	}
 
 	else if(pollCtr >= pollRate){ /* Else check poll counter */
@@ -1271,6 +1293,7 @@ void showHelp(void)
 	printf("  -l, --log  PATH         Path name to debug log file when daemonized\n");
 	printf("  -n, --no-background     Do not fork into the background (useful for debugging)\n");
 	printf("  -p, --com-port PORT     Set the communications port (default is %s)\n", comPort);
+	printf("  -r, --poll-rate RATE    Set the poll rate in seconds");
 	printf("  -s, --instance ID       Set instance id. Default is %s", instanceID);
 	printf("  -v, --version           Display program version\n");
 	printf("\n");
@@ -1305,23 +1328,23 @@ int main(int argc, char *argv[])
 		/* Handle each argument. */
 		switch(optchar) {
 			
-			/* Was it a long option? */
+				/* Was it a long option? */
 			case 0:
 				
 				/* Hrmm, something we don't know about? */
 				fatal("Unhandled long getopt option '%s'", longOptions[longindex].name);
 			
-			/* If it was an error, exit right here. */
+				/* If it was an error, exit right here. */
 			case '?':
 				exit(1);
 		
-			/* Was it a config file switch? */
+				/* Was it a config file switch? */
 			case 'c':
 				confreadStringCopy(configFile, optarg, WS_SIZE - 1);
 				debug(DEBUG_ACTION,"New config file path is: %s", configFile);
 				break;
 				
-			/* Was it a debug level set? */
+				/* Was it a debug level set? */
 			case 'd':
 
 				/* Save the value. */
@@ -1339,12 +1362,12 @@ int main(int argc, char *argv[])
 				debug(DEBUG_ACTION,"New pid file path is: %s", pidFile);
 				break;
 			
-			/* Was it a help request? */
+				/* Was it a help request? */
 			case 'h':
 				showHelp();
 				exit(0);
 
-			/* Specify interface to broadcast on */
+				/* Specify interface to broadcast on */
 			case 'i': 
 				confreadStringCopy(interface, optarg, WS_SIZE -1);
 				clOverride.interface = 1;
@@ -1359,13 +1382,12 @@ int main(int argc, char *argv[])
 
 				break;
 
-			/* Was it a no-backgrounding request? */
+				/* Was it a no-backgrounding request? */
 			case 'n':
-
 				/* Mark that we shouldn't background. */
 				noBackground = TRUE;
-
 				break;
+				
 			case 'p':
 				/* Override com port*/
 				confreadStringCopy(comPort, optarg, WS_SIZE - 1);
@@ -1374,8 +1396,16 @@ int main(int argc, char *argv[])
 				comPort);
 
 				break;
+						
+			case 'r':
+				/* Was it a poll rate? */
+				if(!str2uns(optarg, &pollRate, POLL_RATE_MIN, POLL_RATE_MAX))
+					fatal("Command line poll rate must be between %d and  %d seconds", POLL_RATE_MIN, POLL_RATE_MAX);
+				clOverride.poll_rate = 1;
+				break;
+			
 
-			/* Was it an instance ID ? */
+				/* Was it an instance ID ? */
 			case 's':
 				confreadStringCopy(instanceID, optarg, WS_SIZE);
 				clOverride.instance_id = 1;
@@ -1383,14 +1413,14 @@ int main(int argc, char *argv[])
 				break;
 
 
-			/* Was it a version request? */
+				/* Was it a version request? */
 			case 'v':
 				printf("Version: %s\n", VERSION);
 				exit(0);
 	
 
 			
-			/* It was something weird.. */
+				/* It was something weird.. */
 			default:
 				fatal("Unhandled getopt return value %d", optchar);
 		}
@@ -1468,6 +1498,12 @@ int main(int argc, char *argv[])
 	/* log path */
 	if((!clOverride.log_path) && (p = confreadValueBySectKey(configEntry, "general", "log-path")))
 		confreadStringCopy(logPath, p, sizeof(logPath));
+		
+	/* poll rate */
+	if(((!clOverride.poll_rate) && (p = confreadValueBySectKey(configEntry, "general", "poll-rate")))){
+		if(!str2uns(p, &pollRate, POLL_RATE_MIN, POLL_RATE_MAX))
+			fatal("Poll Rate must be between %d and %d seconds", POLL_RATE_MIN, POLL_RATE_MAX);
+	}
 		
 
 	/* Turn on library debugging for level 5 */
