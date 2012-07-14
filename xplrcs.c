@@ -58,6 +58,7 @@
 #define DEF_PID_FILE		"/var/run/xplrcs.pid"
 #define DEF_CONFIG_FILE		"/etc/xplrcs.conf"
 #define DEF_INSTANCE_ID		"hvac"
+#define	DEF_UNITS			"celsius"
 
 /* 
 * Command types
@@ -138,10 +139,11 @@ static ConfigEntryPtr_t	configEntry = NULL;
 
 static char configFile[WS_SIZE] = DEF_CONFIG_FILE;
 static char comPort[WS_SIZE] = DEF_COM_PORT;
-static char interface[WS_SIZE] = "";
+static char interface[20] = "";
 static char logPath[WS_SIZE] = "";
-static char instanceID[WS_SIZE] = DEF_INSTANCE_ID;
+static char instanceID[128] = DEF_INSTANCE_ID;
 static char pidFile[WS_SIZE] = DEF_PID_FILE;
+static char units[20] = DEF_UNITS;
 
 /* Commandline options. */
 
@@ -785,7 +787,7 @@ static void doZoneInfo(String ws, ZoneEntryPtr_t ze)
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "fan-mode-list", makeCommaList(ws, fanModeList));
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "setpoint-list", makeCommaList(ws, setPointList));
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "display-list", makeCommaList(ws, displayList));
-	xPL_setMessageNamedValue(xplrcsStatusMessage, "scale", "fahrenheit"); /* FIXME */
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "units", units); 
 
 	if(!xPL_sendMessage(xplrcsStatusMessage))
 		debug(DEBUG_UNEXPECTED, "request.zoneinfo status transmission failed");
@@ -1504,6 +1506,12 @@ int main(int argc, char *argv[])
 	if(((!clOverride.poll_rate) && (p = confreadValueBySectKey(configEntry, "general", "poll-rate")))){
 		if(!str2uns(p, &pollRate, POLL_RATE_MIN, POLL_RATE_MAX))
 			fatal("Poll Rate must be between %d and %d seconds", POLL_RATE_MIN, POLL_RATE_MAX);
+	}
+	/* units */
+	if(((!clOverride.poll_rate) && (p = confreadValueBySectKey(configEntry, "general", "units")))){
+		confreadStringCopy(units, p, sizeof(units));
+		if((strcmp(units, "celsius")) && (strcmp(units, "fahrenheit")))
+			fatal("Units must be either celsius or fahrenheit");
 	}
 		
 

@@ -45,8 +45,15 @@
 #
 zones = thermostat
 #
+# The units option is used to specify whether the temperature is reported in celsius or fahrenheit
+#
+#units = celsius
+#
+#
+#
 # End of General Section
 #
+
 
 #
 # Zones are sections which stand by themselves and are listed in the general section above under the zones key.
