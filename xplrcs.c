@@ -53,6 +53,7 @@
 #define MAX_ZONES 10
 #define	POLL_RATE_MIN 2
 #define	POLL_RATE_MAX 180
+#define SERIAL_RETRY_TIME 5
 
 #define DEF_COM_PORT		"/dev/ttyS0"
 #define DEF_PID_FILE		"/var/run/xplrcs.pid"
@@ -121,6 +122,7 @@ int debugLvl = 0;
 static Bool noBackground = FALSE;
 static unsigned pollRate = 5;
 static unsigned numZones = 0;
+static unsigned serialRetryTimer = 0;
 static clOverride_t clOverride = {0,0,0,0,0,0};
 static CmdEntryPtr_t cmdEntryHead = NULL;
 static CmdEntryPtr_t cmdEntryTail = NULL;
@@ -240,7 +242,7 @@ static const String setPointCommands[] = {
 /* List of valid display keywords */
 
 static const String displayList[] = {
-	"outside-temp",
+	"outsidetemp",
 	"lock",
 	NULL
 };
@@ -995,10 +997,20 @@ static void serioHandler(int fd, int revents, int userValue)
 	String lastArgList[20];
 
 
-	
 	/* Do non-blocking line read */
 	if(serio_nb_line_read(serioStuff)){
-		/* Got a line */
+		/* Got a line or EOF */
+		if(serio_ateof(serioStuff)){
+			debug(DEBUG_EXPECTED, "EOF detected on serial port, closing port");
+			if(!xPL_removeIODevice(serio_fd(serioStuff))) /* Unregister ourself */
+				debug(DEBUG_UNEXPECTED,"Could not unregister from poll list");
+			serio_close(serioStuff); /* Close serial port */
+			serioStuff = NULL;
+			serialRetryTimer = SERIAL_RETRY_TIME;
+			return; /* Bail */
+		}
+
+			
 		line = serio_line(serioStuff);
 		if(pollPending){ /* If this pointer is non-null, we are expecting a poll response */
 			
@@ -1231,7 +1243,23 @@ static void tickHandler(int userVal, xPL_ObjectPtr obj)
 
 	debug(DEBUG_STATUS, "TICK: %d", pollCtr);
 	/* Process clock tick update checking */
-
+	
+	if(serialRetryTimer){ /* If this is non-zero, we lost the serial connection, wait retry time and try again */
+		serialRetryTimer--;
+		if(!serialRetryTimer){
+			if(!(serioStuff = serio_open(comPort, 9600))){
+				debug(DEBUG_UNEXPECTED,"Serial reconnect failed, trying later...");
+				serialRetryTimer = SERIAL_RETRY_TIME;
+				return;
+			}
+			else{
+				debug(DEBUG_EXPECTED,"Serial reconnect successful");
+				if(!xPL_addIODevice(serioHandler, 1234, serio_fd(serioStuff), TRUE, FALSE, FALSE))
+					fatal("Could not register serial I/O fd with xPL");
+			}
+		}
+	}
+				
 	doSetDateTime();
 
 	if(!readySent){
