@@ -66,7 +66,7 @@
 */
 
 typedef enum {CMDTYPE_NONE=0, CMDTYPE_BASIC, CMDTYPE_RQ_SETPOINT_HEAT, CMDTYPE_RQ_SETPOINT_COOL, 
-CMDTYPE_RQ_ZONE, CMDTYPE_DATETIME} CmdType_t;
+CMDTYPE_RQ_ZONE, CMDTYPE_DATETIME, CMDTYPE_RQ_HEATTIME, CMDTYPE_RQ_COOLTIME} CmdType_t;
 
 
 /*
@@ -459,8 +459,7 @@ static String getVal(String ws, int wslimit, String *argList, String key)
 	String v;
 
 	for(i = 0; argList[i]; i++){
-		strncpy(ws, argList[i], wslimit); /* Make a local copy we can modify */
-		ws[wslimit - 1] = 0;
+		confreadStringCopy(ws, argList[i], wslimit); /* Make a local copy we can modify */
 
 		if(!(v = strchr(ws, '='))) /* If there is no =, then bail */
 			break;
@@ -714,6 +713,47 @@ static String doDisplay(String ws, xPL_MessagePtr theMessage, ZoneEntryPtr_t ze)
 	return res;	
 }
 
+/*
+ * Build run time command
+ */
+ 
+static String buildRTCmd(String ws, char rq, String setQuery)
+{
+	if(!ws)
+		return NULL;
+		
+	if(!setQuery)
+		setQuery = "?";
+	
+	sprintf(ws, " RT%c=%s", rq, setQuery);
+
+	return ws;
+}
+
+/*
+ * Do get runtime command
+ */
+
+static void doGetRT(String ws, xPL_MessagePtr theMessage, ZoneEntryPtr_t ze)
+{
+	char rq;
+	
+	String state = xPL_getMessageNamedValue(theMessage, "state");
+	
+	if(!ws || !theMessage || !ze || !state) /* Must have valid pointers */
+		return;
+		
+	if(!strcmp(state, setPointList[0])){ /* heating */
+		rq = 'H';
+	}
+	else if(!strcmp(state, setPointList[1])){ /* cooling */
+		rq = 'C';
+	}
+	else
+		return;
+	if(buildRTCmd(ws, rq, NULL))	
+		queueCommand(ze, ws, (rq == 'H') ? CMDTYPE_RQ_HEATTIME : CMDTYPE_RQ_COOLTIME); /* Queue the command */
+}
 
 
 
@@ -789,6 +829,7 @@ static void doZoneInfo(String ws, ZoneEntryPtr_t ze)
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "fan-mode-list", makeCommaList(ws, fanModeList));
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "setpoint-list", makeCommaList(ws, setPointList));
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "display-list", makeCommaList(ws, displayList));
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "hvac-state-list", makeCommaList(ws, modeList));
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "units", units); 
 
 	if(!xPL_sendMessage(xplrcsStatusMessage))
@@ -965,11 +1006,14 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 							case 4: /* zone */
 								doZoneResponse(ws, ze);
 								break;
+								
+							case 5: /* runtime */
+								doGetRT(ws, theMessage, ze);
+								break;
 
 							default:
 								break;
-						}
-								
+						}								
 					}
 				}
 			}
@@ -986,6 +1030,7 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 
 static void serioHandler(int fd, int revents, int userValue)
 {
+	char wc[20];
 	Bool sendZoneTrigger = FALSE;
 	Bool sendHeatSetPointTrigger = FALSE;
 	Bool sendCoolSetPointTrigger = FALSE;
@@ -1133,7 +1178,6 @@ static void serioHandler(int fd, int revents, int userValue)
 		} /* End if(pollPending) */
 		else{  /* It's a response not related to a poll (i.e. a response from a request) */
 
-	
 			if(!(wscur = strdup(line)))
 				MALLOC_ERROR;
 
@@ -1142,77 +1186,107 @@ static void serioHandler(int fd, int revents, int userValue)
 			/* Parse the returned arguments */
 			curArgc = parseRC65Status(wscur, curArgList, 19);
 			/* If it was a set point request */
-			if((cmdEntryTail) && ((cmdEntryTail->type == CMDTYPE_RQ_SETPOINT_HEAT)||(cmdEntryTail->type == CMDTYPE_RQ_SETPOINT_COOL))){
-				char wc[20];
-				/* Setpoint status (heat or cool) requested */
-				debug(DEBUG_EXPECTED,"Setpoint Status requested"); 
-				xPL_setSchema(xplrcsStatusMessage, "hvac", "setpoint");
-				xPL_clearMessageNamedValues(xplrcsStatusMessage);
-				xPL_setMessageNamedValue(xplrcsStatusMessage, "zone", 
-				(cmdEntryTail->ze && cmdEntryTail->ze->name) ? cmdEntryTail->ze->name : "unknown");
+			if(cmdEntryTail){
+				if((cmdEntryTail->type == CMDTYPE_RQ_SETPOINT_HEAT)||(cmdEntryTail->type == CMDTYPE_RQ_SETPOINT_COOL)){
+					/* Setpoint status (heat or cool) requested */
+					debug(DEBUG_EXPECTED,"Setpoint Status requested"); 
+					xPL_setSchema(xplrcsStatusMessage, "hvac", "setpoint");
+					xPL_clearMessageNamedValues(xplrcsStatusMessage);
+					xPL_setMessageNamedValue(xplrcsStatusMessage, "zone", 
+					(cmdEntryTail->ze && cmdEntryTail->ze->name) ? cmdEntryTail->ze->name : "unknown");
 
-				if(cmdEntryTail->type == CMDTYPE_RQ_SETPOINT_HEAT){
-					/* Setpoint heat requested */
-					val = getVal(wc, sizeof(wc), curArgList, "SPH");
-					if(val)
-						xPL_setMessageNamedValue(xplrcsStatusMessage, setPointList[0], val );
-				}
-				else{
-					val = getVal(wc, sizeof(wc), curArgList, "SPC");
-					if(val)
-						xPL_setMessageNamedValue(xplrcsStatusMessage, setPointList[1], val );
-				}
-				if(val && !xPL_sendMessage(xplrcsStatusMessage))
-					debug(DEBUG_UNEXPECTED, "Setpoint status transmission failed");
-			}
-			/* If it was a zone info request */
-			else if((cmdEntryTail) && (cmdEntryTail->type == CMDTYPE_RQ_ZONE)){
-				char wc[20];
-				debug(DEBUG_EXPECTED,"Zone Status requested"); 
-				xPL_setSchema(xplrcsStatusMessage, "hvac", "zone");
-				xPL_clearMessageNamedValues(xplrcsStatusMessage);
-				for(i = 0 ; curArgList[i]; i++){ /* Iterate through arg list */
-					debug(DEBUG_ACTION, "Arg: %s", curArgList[i]);
-					if(!strncmp(curArgList[i], "O=", 2))
-						xPL_setMessageNamedValue(xplrcsStatusMessage, "zone",
-						(cmdEntryTail->ze && cmdEntryTail->ze->name) ? cmdEntryTail->ze->name : "unknown");
-					else if(!strncmp(curArgList[i], "FM=", 3)){
-						val = getVal(wc, sizeof(wc), curArgList, "FM");
-						if(val){
-							if(!strcmp(val, "0"))
-								val = fanModeList[0];
-							else
-								val = fanModeList[1];
-							xPL_setMessageNamedValue(xplrcsStatusMessage,"fan-mode", val);
-						}
+					if(cmdEntryTail->type == CMDTYPE_RQ_SETPOINT_HEAT){
+						/* Setpoint heat requested */
+						val = getVal(wc, sizeof(wc), curArgList, "SPH");
+						if(val)
+							xPL_setMessageNamedValue(xplrcsStatusMessage, setPointList[0], val );
 					}
-					else if(!strncmp(curArgList[i], "M=", 2)){
-						val = getVal(wc, sizeof(wc), curArgList, "M");
-						if(val){
-							if(!strcmp(val, "O"))
-								val = modeList[0];
-							else if(!strcmp(val, "H"))
-								val = modeList[1];
-							else if(!strcmp(val, "C"))
-								val = modeList[2];
-							else if(!strcmp(val, "A"))
-								val = modeList[3];
-							else
-								val = "?";
-							xPL_setMessageNamedValue(xplrcsStatusMessage,"hvac-mode", val);
-						}
+					else{
+						val = getVal(wc, sizeof(wc), curArgList, "SPC");
+						if(val)
+							xPL_setMessageNamedValue(xplrcsStatusMessage, setPointList[1], val );
 					}
-					else if(!strncmp(curArgList[i], "T=", 2)){
-						val = getVal(wc, sizeof(wc), curArgList, "T");
-						if(val){
-							xPL_setMessageNamedValue(xplrcsStatusMessage,"temperature", val);
+					if(val && !xPL_sendMessage(xplrcsStatusMessage))
+						debug(DEBUG_UNEXPECTED, "Setpoint status transmission failed");
+				}
+				/* If it was a zone info request */
+				else if(cmdEntryTail->type == CMDTYPE_RQ_ZONE){
+					char wc[20];
+					debug(DEBUG_EXPECTED,"Zone Status requested"); 
+					xPL_setSchema(xplrcsStatusMessage, "hvac", "zone");
+					xPL_clearMessageNamedValues(xplrcsStatusMessage);
+					for(i = 0 ; curArgList[i]; i++){ /* Iterate through arg list */
+						debug(DEBUG_ACTION, "Arg: %s", curArgList[i]);
+						if(!strncmp(curArgList[i], "O=", 2))
+							xPL_setMessageNamedValue(xplrcsStatusMessage, "zone",
+							(cmdEntryTail->ze && cmdEntryTail->ze->name) ? cmdEntryTail->ze->name : "unknown");
+						else if(!strncmp(curArgList[i], "FM=", 3)){
+							val = getVal(wc, sizeof(wc), curArgList, "FM");
+							if(val){
+								if(!strcmp(val, "0"))
+									val = fanModeList[0];
+								else
+									val = fanModeList[1];
+								xPL_setMessageNamedValue(xplrcsStatusMessage,"fan-mode", val);
+							}
+						}
+						else if(!strncmp(curArgList[i], "M=", 2)){
+							val = getVal(wc, sizeof(wc), curArgList, "M");
+							if(val){
+								if(!strcmp(val, "O"))
+									val = modeList[0];
+								else if(!strcmp(val, "H"))
+									val = modeList[1];
+								else if(!strcmp(val, "C"))
+									val = modeList[2];
+								else if(!strcmp(val, "A"))
+									val = modeList[3];
+								else
+									val = "?";
+								xPL_setMessageNamedValue(xplrcsStatusMessage,"hvac-mode", val);
+							}
+						}
+						else if(!strncmp(curArgList[i], "T=", 2)){
+							val = getVal(wc, sizeof(wc), curArgList, "T");
+							if(val){
+								xPL_setMessageNamedValue(xplrcsStatusMessage,"temperature", val);
+							}
+
 						}
 
 					}
+					if(!xPL_sendMessage(xplrcsStatusMessage))
+						debug(DEBUG_UNEXPECTED, "Zone info transmission failed");
+				} 
+				/* Heat or cool run times */
+				else if ((cmdEntryTail->type == CMDTYPE_RQ_HEATTIME)||(cmdEntryTail->type == CMDTYPE_RQ_COOLTIME)){
+					debug(DEBUG_EXPECTED,"Run time requested"); 
+					xPL_setSchema(xplrcsStatusMessage, "hvac", "runtime");
+					xPL_clearMessageNamedValues(xplrcsStatusMessage);
+					xPL_setMessageNamedValue(xplrcsStatusMessage, "zone", 
+					(cmdEntryTail->ze && cmdEntryTail->ze->name) ? cmdEntryTail->ze->name : "unknown");
 
+					if(cmdEntryTail->type == CMDTYPE_RQ_HEATTIME){
+						/* Setpoint heat requested */
+						val = getVal(wc, sizeof(wc), curArgList, "RTH");
+						if(val)
+							xPL_setMessageNamedValue(xplrcsStatusMessage, setPointList[0], val); /* Heating */
+					}
+					else{
+						val = getVal(wc, sizeof(wc), curArgList, "RTC");
+						if(val)
+							xPL_setMessageNamedValue(xplrcsStatusMessage, setPointList[1], val); /* Cooling */
+					}
+					if(val){
+						
+						xPL_setMessageNamedValue(xplrcsStatusMessage, "units", "hours");
+						
+						if(!xPL_sendMessage(xplrcsStatusMessage))
+							debug(DEBUG_UNEXPECTED, "Setpoint status transmission failed");
+					
+					}
+					
 				}
-				if(!xPL_sendMessage(xplrcsStatusMessage))
-					debug(DEBUG_UNEXPECTED, "Zone info transmission failed");
 			}
 			/* Free the command entry */
 			dequeueAndFreeCommand();
