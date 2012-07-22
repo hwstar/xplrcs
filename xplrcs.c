@@ -183,6 +183,7 @@ static const String requestCommandList[] = {
 	"zoneinfo",
 	"setpoint",
 	"zone",
+	"runtime",
 	NULL
 };
 
