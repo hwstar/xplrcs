@@ -171,6 +171,8 @@ static const String basicCommandList[] = {
 	"fan-mode",
 	"setpoint",
 	"display",
+	"reset-runtime",
+	"reset-fantime",
 	NULL
 };
 
@@ -764,6 +766,34 @@ static void doGetRT(String ws, xPL_MessagePtr theMessage, ZoneEntryPtr_t ze)
 		queueCommand(ze, ws, (rq == 'H') ? CMDTYPE_RQ_HEATTIME : CMDTYPE_RQ_COOLTIME); /* Queue the command */
 }
 
+/*
+ * Reset fan time to zero
+ */
+ 
+static String doResetRunTime(String ws, xPL_MessagePtr theMessage, ZoneEntryPtr_t ze)
+{
+
+	char rq;
+	
+	String state = xPL_getMessageNamedValue(theMessage, "state");
+	
+	if(!ws || !theMessage || !ze || !state) /* Must have valid pointers */
+		return NULL;
+		
+	if(!strcmp(state, setPointList[0])){ /* heating */
+		rq = 'H';
+	}
+	else if(!strcmp(state, setPointList[1])){ /* cooling */
+		rq = 'C';
+	}
+	else
+		return NULL;
+		
+	buildRTCmd(ws, rq, "0");	
+	
+	return ws;
+}
+
 
 /*
  * Do get fantime command
@@ -787,6 +817,30 @@ static void doGetFT(String ws, xPL_MessagePtr theMessage, ZoneEntryPtr_t ze)
 	if(buildRTCmd(ws, rq, NULL))	
 		queueCommand(ze, ws, CMDTYPE_RQ_FANTIME); /* Queue the command */
 	
+}
+
+/*
+ * Reset fan time to zero
+ */
+ 
+static String doResetFanTime(String ws, xPL_MessagePtr theMessage, ZoneEntryPtr_t ze)
+{
+	char rq;
+	
+	String state = xPL_getMessageNamedValue(theMessage, "state");
+	
+	if(!ws || !theMessage || !ze || !state) /* Must have valid pointers */
+		return NULL;
+		
+	if(!strcmp(state, fanStateList[0])){ /* running */
+		rq = 'F';
+	}
+	else
+		return NULL;
+		
+	buildRTCmd(ws, rq, "0");	
+	
+	return ws;
 }
 
 
@@ -1004,6 +1058,14 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 
 							case 3: /* display */
 								cmd = doDisplay(ws, theMessage, ze);
+								break;
+								
+							case 4: /* reset-runtime */
+								cmd = doResetRunTime(ws, theMessage, ze);
+								break;
+								
+							case 5: /* reset-fantime */
+								cmd = doResetFanTime(ws, theMessage, ze);
 								break;
 					
 							default:
