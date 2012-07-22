@@ -725,7 +725,7 @@ static String buildRTCmd(String ws, char rq, String setQuery)
 	if(!setQuery)
 		setQuery = "?";
 	
-	sprintf(ws, " RT%c=%s", rq, setQuery);
+	sprintf(ws+strlen(ws), " RT%c=%s", rq, setQuery);
 
 	return ws;
 }
