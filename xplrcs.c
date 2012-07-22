@@ -66,7 +66,7 @@
 */
 
 typedef enum {CMDTYPE_NONE=0, CMDTYPE_BASIC, CMDTYPE_RQ_SETPOINT_HEAT, CMDTYPE_RQ_SETPOINT_COOL, 
-CMDTYPE_RQ_ZONE, CMDTYPE_DATETIME, CMDTYPE_RQ_HEATTIME, CMDTYPE_RQ_COOLTIME} CmdType_t;
+CMDTYPE_RQ_ZONE, CMDTYPE_DATETIME, CMDTYPE_RQ_HEATTIME, CMDTYPE_RQ_COOLTIME, CMDTYPE_RQ_FANTIME} CmdType_t;
 
 
 /*
@@ -184,6 +184,7 @@ static const String requestCommandList[] = {
 	"setpoint",
 	"zone",
 	"runtime",
+	"fantime",
 	NULL
 };
 
@@ -229,6 +230,13 @@ static const String fanModeCommands[] = {
 static const String setPointList[] = {
 	"heating",
 	"cooling",
+	NULL
+};
+
+/* Fan state list */
+
+static const String fanStateList[] = {
+	"running",
 	NULL
 };
 
@@ -757,6 +765,30 @@ static void doGetRT(String ws, xPL_MessagePtr theMessage, ZoneEntryPtr_t ze)
 }
 
 
+/*
+ * Do get fantime command
+ */
+
+static void doGetFT(String ws, xPL_MessagePtr theMessage, ZoneEntryPtr_t ze)
+{
+	char rq;
+	
+	String state = xPL_getMessageNamedValue(theMessage, "state");
+	
+	if(!ws || !theMessage || !ze || !state) /* Must have valid pointers */
+		return;
+		
+	if(!strcmp(state, fanStateList[0])){ /* running */
+		rq = 'F';
+	}
+	else
+		return;
+		
+	if(buildRTCmd(ws, rq, NULL))	
+		queueCommand(ze, ws, CMDTYPE_RQ_FANTIME); /* Queue the command */
+	
+}
+
 
 
 /*
@@ -829,8 +861,9 @@ static void doZoneInfo(String ws, ZoneEntryPtr_t ze)
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "hvac-mode-list", makeCommaList(ws, modeList));
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "fan-mode-list", makeCommaList(ws, fanModeList));
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "setpoint-list", makeCommaList(ws, setPointList));
-	xPL_setMessageNamedValue(xplrcsStatusMessage, "display-list", makeCommaList(ws, displayList));
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "hvac-state-list", makeCommaList(ws, setPointList));
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "fan-state-list", makeCommaList(ws, fanStateList));
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "display-list", makeCommaList(ws, displayList));
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "units", units); 
 
 	if(!xPL_sendMessage(xplrcsStatusMessage))
@@ -1010,6 +1043,10 @@ static void xPLListener(xPL_MessagePtr theMessage, xPL_ObjectPtr userValue)
 								
 							case 5: /* runtime */
 								doGetRT(ws, theMessage, ze);
+								break;
+								
+							case 6: /* fantime */
+								doGetFT(ws, theMessage, ze);
 								break;
 
 							default:
@@ -1270,16 +1307,14 @@ static void serioHandler(int fd, int revents, int userValue)
 					if(cmdEntryTail->type == CMDTYPE_RQ_HEATTIME){
 						/* Setpoint heat requested */
 						val = getVal(wc, sizeof(wc), curArgList, "RTH");
-						if(val)
-							xPL_setMessageNamedValue(xplrcsStatusMessage, setPointList[0], val); /* Heating */
+						xPL_setMessageNamedValue(xplrcsStatusMessage, "state", setPointList[0]); /* Heating */
 					}
 					else{
 						val = getVal(wc, sizeof(wc), curArgList, "RTC");
-						if(val)
-							xPL_setMessageNamedValue(xplrcsStatusMessage, setPointList[1], val); /* Cooling */
+						xPL_setMessageNamedValue(xplrcsStatusMessage, "state", setPointList[1]); /* Cooling */
 					}
 					if(val){
-						
+						xPL_setMessageNamedValue(xplrcsStatusMessage, "time", val);
 						xPL_setMessageNamedValue(xplrcsStatusMessage, "units", "hours");
 						
 						if(!xPL_sendMessage(xplrcsStatusMessage))
@@ -1288,6 +1323,28 @@ static void serioHandler(int fd, int revents, int userValue)
 					}
 					
 				}
+				/* Fan Time requested? */
+				else if (cmdEntryTail->type == CMDTYPE_RQ_FANTIME){
+					debug(DEBUG_EXPECTED,"Fan time requested"); 
+
+
+			
+					val = getVal(wc, sizeof(wc), curArgList, "RTF");
+					if(val){
+						xPL_setSchema(xplrcsStatusMessage, "hvac", "fantime");
+						xPL_clearMessageNamedValues(xplrcsStatusMessage);
+						xPL_setMessageNamedValue(xplrcsStatusMessage, "zone", 
+						(cmdEntryTail->ze && cmdEntryTail->ze->name) ? cmdEntryTail->ze->name : "unknown");
+						xPL_setMessageNamedValue(xplrcsStatusMessage, "state", fanStateList[0]); /* running */
+						xPL_setMessageNamedValue(xplrcsStatusMessage, "time", val);
+						xPL_setMessageNamedValue(xplrcsStatusMessage, "units", "hours");
+						if(!xPL_sendMessage(xplrcsStatusMessage))
+							debug(DEBUG_UNEXPECTED, "Setpoint status transmission failed");
+					
+					}
+					
+				}
+					
 			}
 			/* Free the command entry */
 			dequeueAndFreeCommand();
