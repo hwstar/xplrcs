@@ -829,7 +829,7 @@ static void doZoneInfo(String ws, ZoneEntryPtr_t ze)
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "fan-mode-list", makeCommaList(ws, fanModeList));
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "setpoint-list", makeCommaList(ws, setPointList));
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "display-list", makeCommaList(ws, displayList));
-	xPL_setMessageNamedValue(xplrcsStatusMessage, "hvac-state-list", makeCommaList(ws, modeList));
+	xPL_setMessageNamedValue(xplrcsStatusMessage, "hvac-state-list", makeCommaList(ws, setPointList));
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "units", units); 
 
 	if(!xPL_sendMessage(xplrcsStatusMessage))
