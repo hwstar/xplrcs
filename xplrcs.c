@@ -145,7 +145,7 @@ static char interface[20] = "";
 static char logPath[WS_SIZE] = "";
 static char instanceID[128] = DEF_INSTANCE_ID;
 static char pidFile[WS_SIZE] = DEF_PID_FILE;
-static char units[20] = DEF_UNITS;
+static char temperatureUnits[20] = DEF_UNITS;
 
 /* Commandline options. */
 
@@ -918,7 +918,7 @@ static void doZoneInfo(String ws, ZoneEntryPtr_t ze)
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "hvac-state-list", makeCommaList(ws, setPointList));
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "fan-state-list", makeCommaList(ws, fanStateList));
 	xPL_setMessageNamedValue(xplrcsStatusMessage, "display-list", makeCommaList(ws, displayList));
-	xPL_setMessageNamedValue(xplrcsStatusMessage, "units", units); 
+
 
 	if(!xPL_sendMessage(xplrcsStatusMessage))
 		debug(DEBUG_UNEXPECTED, "request.zoneinfo status transmission failed");
@@ -1203,6 +1203,7 @@ static void serioHandler(int fd, int revents, int userValue)
 							xPL_setMessageNamedValue(xplrcsHeatSetPointTriggerMessage, "zone", pollPending->name);
 							xPL_setMessageNamedValue(xplrcsHeatSetPointTriggerMessage, "setpoint", setPointList[0]);
 							xPL_setMessageNamedValue(xplrcsHeatSetPointTriggerMessage, "temperature", pd );
+							xPL_setMessageNamedValue(xplrcsHeatSetPointTriggerMessage, "units", temperatureUnits); 
 						}
 
 						else if(!strcmp(arg, "SPC")){ /* SPC has a dedicated trigger resource */
@@ -1211,6 +1212,7 @@ static void serioHandler(int fd, int revents, int userValue)
 							xPL_setMessageNamedValue(xplrcsCoolSetPointTriggerMessage, "zone", pollPending->name);
 							xPL_setMessageNamedValue(xplrcsCoolSetPointTriggerMessage, "setpoint", setPointList[1]);
 							xPL_setMessageNamedValue(xplrcsCoolSetPointTriggerMessage, "temperature", pd );
+							xPL_setMessageNamedValue(xplrcsCoolSetPointTriggerMessage, "units", temperatureUnits); 
 						}
 						else if(!strcmp(arg, "FM")){ /* Zone triggers share a trigger resource */
 							sendZoneTrigger = TRUE;
@@ -1239,6 +1241,7 @@ static void serioHandler(int fd, int revents, int userValue)
 						else if(!strcmp(arg, "T")){
 							sendZoneTrigger = TRUE;
 							xPL_setMessageNamedValue(xplrcsZoneTriggerMessage,"temperature", pd);
+							xPL_setMessageNamedValue(xplrcsZoneTriggerMessage,"units", temperatureUnits);
 						}
 					} /* End if */
 
@@ -1306,6 +1309,8 @@ static void serioHandler(int fd, int revents, int userValue)
 						if(val)
 							xPL_setMessageNamedValue(xplrcsStatusMessage, setPointList[1], val );
 					}
+					if(val)
+						xPL_setMessageNamedValue(xplrcsStatusMessage, "units", temperatureUnits);
 					if(val && !xPL_sendMessage(xplrcsStatusMessage))
 						debug(DEBUG_UNEXPECTED, "Setpoint status transmission failed");
 				}
@@ -1350,6 +1355,7 @@ static void serioHandler(int fd, int revents, int userValue)
 							val = getVal(wc, sizeof(wc), curArgList, "T");
 							if(val){
 								xPL_setMessageNamedValue(xplrcsStatusMessage,"temperature", val);
+								xPL_setMessageNamedValue(xplrcsStatusMessage, "units", temperatureUnits);
 							}
 
 						}
@@ -1731,8 +1737,8 @@ int main(int argc, char *argv[])
 	}
 	/* units */
 	if(((!clOverride.poll_rate) && (p = confreadValueBySectKey(configEntry, "general", "units")))){
-		confreadStringCopy(units, p, sizeof(units));
-		if((strcmp(units, "celsius")) && (strcmp(units, "fahrenheit")))
+		confreadStringCopy(temperatureUnits, p, sizeof(temperatureUnits));
+		if((strcmp(temperatureUnits, "celsius")) && (strcmp(temperatureUnits, "fahrenheit")))
 			fatal("Units must be either celsius or fahrenheit");
 	}
 		
